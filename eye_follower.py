@@ -5,7 +5,6 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from collections import deque
 
-# 1. Initialize MediaPipe Face Landmarker
 base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
 options = vision.FaceLandmarkerOptions(
     base_options=base_options,
@@ -16,7 +15,6 @@ options = vision.FaceLandmarkerOptions(
 )
 detector = vision.FaceLandmarker.create_from_options(options)
 
-# --- Landmark indices ---
 IRIS_LEFT        = [474, 475, 476, 477]
 EYE_LEFT_OUTER   = 33
 EYE_LEFT_INNER   = 133
@@ -32,7 +30,6 @@ EYE_RIGHT_BOTTOM = [374, 373, 390]
 SCREEN_WIDTH  = 1920
 SCREEN_HEIGHT = 1080
 
-# --- Calibration: 9-point grid ---
 CALIB_POINTS_NORM = [
     (0.02, 0.02), (0.5, 0.02), (0.98, 0.02),
     (0.02, 0.25), (0.5, 0.25), (0.98, 0.25),
@@ -40,9 +37,15 @@ CALIB_POINTS_NORM = [
     (0.02, 0.75), (0.5, 0.75), (0.98, 0.75),
     (0.02, 0.98), (0.5, 0.98), (0.98, 0.98),
 ]
-calib_index = 0
-calib_raw   = []
-calib_done  = False
+
+calib_index   = 0
+calib_raw     = []
+calib_done    = False
+
+# Sampling state: after SPACE, collect N frames and average
+SAMPLES_NEEDED   = 30   # ~1 second at 30fps
+sampling_active  = False
+sample_buffer    = []
 
 SMOOTHING_FRAMES = 8
 history_x = deque(maxlen=SMOOTHING_FRAMES)
@@ -82,18 +85,25 @@ def get_combined_gaze(landmarks):
     return (lx + rx) / 2, (ly + ry) / 2
 
 
+def poly_features(x, y):
+    """
+    Expand (x, y) into polynomial features:
+    [1, x, y, x^2, y^2, x*y]
+    This lets the fit curve, not just stretch linearly.
+    """
+    return np.array([1, x, y, x*x, y*y, x*y])
+
+
 def fit_calibration(calib_raw, calib_targets):
-    raw  = np.array(calib_raw)
-    tgt  = np.array(calib_targets)
-    ones = np.ones((len(raw), 1))
-    A    = np.hstack([raw, ones])
+    tgt = np.array(calib_targets)
+    A   = np.array([poly_features(x, y) for x, y in calib_raw])
     cx, _, _, _ = np.linalg.lstsq(A, tgt[:, 0], rcond=None)
     cy, _, _, _ = np.linalg.lstsq(A, tgt[:, 1], rcond=None)
     return cx, cy
 
 
 def apply_calibration(cx, cy, raw_x, raw_y):
-    v        = np.array([raw_x, raw_y, 1.0])
+    v        = poly_features(raw_x, raw_y)
     screen_x = float(np.dot(cx, v))
     screen_y = float(np.dot(cy, v))
     screen_x = max(0.0, min(1.0, screen_x))
@@ -101,7 +111,6 @@ def apply_calibration(cx, cy, raw_x, raw_y):
     return screen_x, screen_y
 
 
-# --- Setup windows ---
 cv2.namedWindow('Sandbox (Your Screen)', cv2.WND_PROP_FULLSCREEN)
 cv2.setWindowProperty('Sandbox (Your Screen)', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 cv2.namedWindow('Camera Feed')
@@ -111,7 +120,7 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 print("Webcam opened!")
-print("Follow the red dot and press SPACE to capture each calibration point.")
+print("Look at each dot, press SPACE, then HOLD STILL for 1 second.")
 
 timestamp_ms = 0
 cx_coeff = cy_coeff = None
@@ -130,20 +139,19 @@ while cap.isOpened():
     result = detector.detect_for_video(mp_image, timestamp_ms)
 
     h, w = image.shape[:2]
-
-    # Always create sandbox at full screen resolution
     sandbox = np.ones((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8) * 30
 
+    face_found = False
     if result.face_landmarks:
         for face_landmarks in result.face_landmarks:
             landmarks = [(lm.x * w, lm.y * h) for lm in face_landmarks]
             ratio_x, ratio_y = get_combined_gaze(landmarks)
+            face_found = True
 
-            # Draw iris centers on camera feed
             for idx in [IRIS_LEFT, IRIS_RIGHT]:
-                pts  = [landmarks[i] for i in idx]
-                icx  = int(sum(p[0] for p in pts) / len(pts))
-                icy  = int(sum(p[1] for p in pts) / len(pts))
+                pts = [landmarks[i] for i in idx]
+                icx = int(sum(p[0] for p in pts) / len(pts))
+                icy = int(sum(p[1] for p in pts) / len(pts))
                 cv2.circle(image, (icx, icy), 4, (0, 215, 255), -1)
 
     # ---- Calibration phase ----
@@ -151,30 +159,69 @@ while cap.isOpened():
         tx = int(CALIB_POINTS_NORM[calib_index][0] * SCREEN_WIDTH)
         ty = int(CALIB_POINTS_NORM[calib_index][1] * SCREEN_HEIGHT)
 
-        # Pulsing dot
-        pulse = int(10 + 6 * abs(np.sin(timestamp_ms / 300)))
-        cv2.circle(sandbox, (tx, ty), pulse + 6, (255, 255, 255), 2)
-        cv2.circle(sandbox, (tx, ty), pulse, (0, 0, 220), -1)
+        # Sampling in progress — fill a progress ring around the dot
+        if sampling_active:
+            if face_found:
+                sample_buffer.append((ratio_x, ratio_y))
 
-        # Instruction text centered on screen
-        text  = f"Look at the dot ({calib_index+1}/9) and press SPACE"
-        tsize = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)[0]
-        tx_   = (SCREEN_WIDTH - tsize[0]) // 2
-        cv2.putText(sandbox, text, (tx_, SCREEN_HEIGHT // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 2)
+            progress = len(sample_buffer) / SAMPLES_NEEDED
+            angle    = int(360 * progress)
 
-        # Progress dots
+            # Draw progress arc
+            cv2.ellipse(sandbox, (tx, ty), (22, 22), -90, 0, angle, (0, 255, 100), 3)
+            cv2.circle(sandbox, (tx, ty), 12, (0, 200, 80), -1)
+
+            status_text = f"Hold still... {len(sample_buffer)}/{SAMPLES_NEEDED}"
+            cv2.putText(sandbox, status_text,
+                        ((SCREEN_WIDTH - 400) // 2, SCREEN_HEIGHT // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+
+            if len(sample_buffer) >= SAMPLES_NEEDED:
+                # Average all samples for this point
+                avg_x = sum(s[0] for s in sample_buffer) / len(sample_buffer)
+                avg_y = sum(s[1] for s in sample_buffer) / len(sample_buffer)
+                calib_raw.append((avg_x, avg_y))
+                print(f"  Point {calib_index+1} captured (avg of {SAMPLES_NEEDED} frames): "
+                      f"({avg_x:.4f}, {avg_y:.4f})")
+
+                sample_buffer.clear()
+                sampling_active = False
+                calib_index    += 1
+
+                if calib_index == len(CALIB_POINTS_NORM):
+                    cx_coeff, cy_coeff = fit_calibration(calib_raw, CALIB_POINTS_NORM)
+                    calib_done = True
+                    print("Calibration complete! Tracking active.")
+
+        else:
+            # Waiting for SPACE
+            pulse = int(10 + 6 * abs(np.sin(timestamp_ms / 300)))
+            cv2.circle(sandbox, (tx, ty), pulse + 6, (255, 255, 255), 2)
+            cv2.circle(sandbox, (tx, ty), pulse, (0, 0, 220), -1)
+
+            text  = f"Look at dot ({calib_index+1}/{len(CALIB_POINTS_NORM)}) — press SPACE"
+            tsize = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)[0]
+            cv2.putText(sandbox, text,
+                        ((SCREEN_WIDTH - tsize[0]) // 2, SCREEN_HEIGHT // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 2)
+
+        # Progress indicators for all points
         for i, (px, py) in enumerate(CALIB_POINTS_NORM):
-            color = (0, 200, 0) if i < calib_index else (100, 100, 100)
+            if i < calib_index:
+                color, size = (0, 200, 0), 8      # done — green
+            elif i == calib_index:
+                color, size = (255, 255, 255), 5  # current — white
+            else:
+                color, size = (80, 80, 80), 6     # pending — grey
             cv2.circle(sandbox,
                        (int(px * SCREEN_WIDTH), int(py * SCREEN_HEIGHT)),
-                       8, color, -1)
+                       size, color, -1)
 
     # ---- Tracking phase ----
     else:
-        sx, sy   = apply_calibration(cx_coeff, cy_coeff, ratio_x, ratio_y)
-        raw_px   = int(sx * SCREEN_WIDTH)
-        raw_py   = int(sy * SCREEN_HEIGHT)
+        sx, sy = apply_calibration(cx_coeff, cy_coeff, ratio_x, ratio_y)
+        raw_px = int(sx * SCREEN_WIDTH)
+        raw_py = int(sy * SCREEN_HEIGHT)
 
         history_x.append(raw_px)
         history_y.append(raw_py)
@@ -183,7 +230,6 @@ while cap.isOpened():
         smooth_x = int(np.average(list(history_x), weights=weights))
         smooth_y = int(np.average(list(history_y), weights=weights))
 
-        # Gaze dot with glow effect
         cv2.circle(sandbox, (smooth_x, smooth_y), 30, (0, 0, 100), -1)
         cv2.circle(sandbox, (smooth_x, smooth_y), 18, (0, 0, 255), -1)
         cv2.circle(sandbox, (smooth_x, smooth_y), 6,  (255, 255, 255), -1)
@@ -191,7 +237,6 @@ while cap.isOpened():
         cv2.putText(sandbox, "Press 'r' to recalibrate  |  'q' to quit",
                     (20, SCREEN_HEIGHT - 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 120, 120), 1)
-
         cv2.putText(image, "Tracking Active! Press 'r' to recalibrate",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(image, f"Gaze  x:{ratio_x:.3f}  y:{ratio_y:.3f}",
@@ -206,24 +251,21 @@ while cap.isOpened():
         break
 
     elif key == ord('r'):
-        calib_index = 0
-        calib_raw   = []
-        calib_done  = False
+        calib_index    = 0
+        calib_raw      = []
+        calib_done     = False
+        sampling_active = False
+        sample_buffer.clear()
         history_x.clear()
         history_y.clear()
         cv2.setWindowProperty('Sandbox (Your Screen)',
                                cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         print("Recalibrating...")
 
-    elif key == ord(' ') and not calib_done:
-        calib_raw.append((ratio_x, ratio_y))
-        print(f"  Point {calib_index+1} captured: ({ratio_x:.4f}, {ratio_y:.4f})")
-        calib_index += 1
-
-        if calib_index == len(CALIB_POINTS_NORM):
-            cx_coeff, cy_coeff = fit_calibration(calib_raw, CALIB_POINTS_NORM)
-            calib_done = True
-            print("Calibration complete! Tracking active.")
+    elif key == ord(' ') and not calib_done and not sampling_active:
+        sampling_active = True
+        sample_buffer.clear()
+        print(f"  Sampling point {calib_index+1}... hold still!")
 
 cap.release()
 cv2.destroyAllWindows()
