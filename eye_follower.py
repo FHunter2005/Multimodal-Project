@@ -3,15 +3,13 @@ Robust Eye Gaze Tracker
 =======================
 Key improvements over the baseline:
   1. Head pose (yaw + pitch from solvePnP) added as SVR features
-     → makes the model invariant to head rotation/translation
   2. Per-eye iris ratios kept separate (4 values instead of averaged 2)
-     → more signal, handles inter-ocular asymmetry
   3. Face scale (inter-ocular distance) as a distance-normalisation feature
-     → partial robustness to leaning forward/back
   4. Calibration outlier rejection via Median Absolute Deviation
-     → noisy blink-frames or micro-movements don't corrupt the fit
   5. Kalman filter (velocity-aware) replaces dual-alpha EMA
-     → smoother cursor, faster to recover after saccades
+  6. Polynomial feature cross-terms (iris × head-pose interactions)
+  7. Per-point confidence weighting during calibration fit
+  8. Online drift correction — press 'd' during tracking to recorrect
 """
 
 import cv2
@@ -23,24 +21,21 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from sklearn.svm import SVR
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 
 
 # =============================================================
-# IMPROVEMENT 5: Kalman Filter
+# Kalman Filter
 # =============================================================
 class KalmanGaze:
     """
     2-D Kalman filter with a constant-velocity model.
     State  : [x, y, vx, vy]
     Measure: [x, y]
-
-    Tune process_noise  ↑ to follow fast movements more closely
-         measurement_noise ↑ to smooth out jitter
     """
-    def __init__(self, process_noise: float = 4e-4, measurement_noise: float = 4e-2):
+    def __init__(self, process_noise: float = 1e-4,
+                 measurement_noise: float = 8e-2, dt: float = 1 / 30):
         self.kf = cv2.KalmanFilter(4, 2)
-        dt = 1.0
         self.kf.transitionMatrix = np.array(
             [[1, 0, dt, 0],
              [0, 1,  0, dt],
@@ -69,55 +64,73 @@ class KalmanGaze:
 
 
 # =============================================================
-# IMPROVEMENT 1–3: Feature Engineering
+# Feature Engineering
 # =============================================================
-#
-# Feature vector (7-D):
-#   [lx, ly, rx, ry, yaw_norm, pitch_norm, face_scale]
-#
-# Normalising yaw/pitch keeps them on a comparable scale to the
-# iris ratios (which are roughly in [-0.5, 0.5]).
-
-FEAT_DIM = 7
-
 def build_feature(lx, ly, rx, ry, yaw, pitch, face_scale):
+    """
+    11-D raw feature vector.
+    The pipeline's PolynomialFeatures then expands this further,
+    but we already bake in the most meaningful cross-terms explicitly
+    so the SVR kernel sees them directly at their natural scale.
+    """
+    yn = yaw   / 30.0   # normalise: ±30° wide head turn
+    pn = pitch / 20.0   # normalise: ±20° wide nod
     return np.array([
-        lx, ly,             # left  eye iris ratio
-        rx, ry,             # right eye iris ratio
-        yaw   / 30.0,       # normalise: ±30° is a wide head turn
-        pitch / 20.0,       # normalise: ±20° is a wide nod
-        face_scale,         # inter-ocular / image-width  (distance proxy)
+        lx, ly, rx, ry,   # per-eye iris ratios
+        yn, pn,            # head pose
+        face_scale,        # inter-ocular / img-width (distance proxy)
+        lx * yn,           # iris-x × yaw  (most important cross-term)
+        rx * yn,
+        ly * pn,           # iris-y × pitch
+        ry * pn,
     ], dtype=np.float64)
 
 
 # =============================================================
-# ML Models (unchanged interface, richer features)
+# ML Models
 # =============================================================
-model_x = make_pipeline(StandardScaler(), SVR(C=5.0, epsilon=0.01, kernel='rbf', gamma='scale'))
-model_y = make_pipeline(StandardScaler(), SVR(C=5.0, epsilon=0.01, kernel='rbf', gamma='scale'))
+def _make_model():
+    return make_pipeline(
+        StandardScaler(),
+        PolynomialFeatures(degree=2, include_bias=False),
+        SVR(C=5.0, epsilon=0.01, kernel='rbf', gamma='scale'),
+    )
+
+model_x = _make_model()
+model_y = _make_model()
 
 
-def fit_calibration(calib_features, calib_targets):
-    """calib_features: list of 7-D arrays; calib_targets: list of (norm_x, norm_y)."""
-    X = np.array(calib_features)   # (N, 7)
-    Y = np.array(calib_targets)    # (N, 2)
+def fit_calibration(features, targets, weights=None):
+    """
+    features : list/array of 11-D feature vectors
+    targets  : list/array of (norm_x, norm_y) pairs
+    weights  : optional list of per-point confidence scalars
+    """
+    X = np.array(features)   # (N, 11)
+    Y = np.array(targets)    # (N, 2)
+
+    if weights is not None and len(weights) == len(X):
+        W = np.array(weights, dtype=np.float64)
+        W = np.clip(W, 1e-6, None)
+        # SVR has no sample_weight; oversample proportionally instead
+        counts = np.round(W / W.min() * 3).astype(int)
+        X = np.repeat(X, counts, axis=0)
+        Y = np.repeat(Y, counts, axis=0)
+
     model_x.fit(X, Y[:, 0])
     model_y.fit(X, Y[:, 1])
-    return True
 
 
 def apply_calibration(feat: np.ndarray):
     pred = feat.reshape(1, -1)
-    sx = model_x.predict(pred)[0]
-    sy = model_y.predict(pred)[0]
-    return float(np.clip(sx, 0.0, 1.0)), float(np.clip(sy, 0.0, 1.0))
+    sx = float(model_x.predict(pred)[0])
+    sy = float(model_y.predict(pred)[0])
+    return np.clip(sx, 0.0, 1.0), np.clip(sy, 0.0, 1.0)
 
 
 # =============================================================
-# IMPROVEMENT 1: Head Pose via solvePnP
+# Head Pose via solvePnP
 # =============================================================
-# Generic 3-D face geometry (mm). These six landmarks are stable
-# and well-detected across faces and lighting.
 _HEAD_3D = np.array([
     [  0.0,    0.0,    0.0],   # 1   nose tip
     [  0.0, -330.0,  -65.0],   # 152 chin
@@ -130,34 +143,25 @@ _HEAD_IDX = [1, 152, 33, 263, 61, 291]
 
 
 def get_head_pose(lm_norm, img_w: int, img_h: int):
-    """
-    Returns (yaw_deg, pitch_deg, roll_deg).
-    yaw   > 0 → head turned right
-    pitch > 0 → head tilted up
-    Returns (0, 0, 0) on solver failure.
-    """
     pts2d = np.array(
         [(lm_norm[i].x * img_w, lm_norm[i].y * img_h) for i in _HEAD_IDX],
         dtype=np.float64)
-
-    fl = float(img_w)   # rough focal-length estimate
+    fl = float(img_w)
     cam_mat = np.array([[fl, 0, img_w / 2],
                         [0, fl, img_h / 2],
                         [0,  0,          1]], dtype=np.float64)
-
     ok, rvec, _ = cv2.solvePnP(
         _HEAD_3D, pts2d, cam_mat, np.zeros((4, 1)),
         flags=cv2.SOLVEPNP_ITERATIVE)
     if not ok:
         return 0.0, 0.0, 0.0
-
     R, _ = cv2.Rodrigues(rvec)
     sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
     if sy > 1e-6:
         pitch = np.degrees(np.arctan2(-R[2, 0], sy))
         yaw   = np.degrees(np.arctan2( R[2, 1], R[2, 2]))
         roll  = np.degrees(np.arctan2( R[1, 0], R[0, 0]))
-    else:                               # gimbal-lock fallback
+    else:
         pitch = np.degrees(np.arctan2(-R[2, 0], sy))
         yaw   = 0.0
         roll  = np.degrees(np.arctan2(-R[0, 1], R[1, 1]))
@@ -165,21 +169,15 @@ def get_head_pose(lm_norm, img_w: int, img_h: int):
 
 
 def get_face_scale(lm_norm) -> float:
-    """Inter-ocular distance in normalised image coords (≈ 1/distance)."""
     l, r = lm_norm[33], lm_norm[263]
     return float(np.hypot(r.x - l.x, r.y - l.y))
 
 
 # =============================================================
-# IMPROVEMENT 4: Calibration Outlier Rejection
+# Calibration Outlier Rejection
 # =============================================================
 def reject_outliers(samples: list, k: float = 2.0) -> np.ndarray:
-    """
-    Keep only samples within k × MAD of the per-dimension median.
-    Falls back to all samples if fewer than 5 survive (avoids
-    discarding everything on a shaky calibration point).
-    """
-    arr = np.array(samples)                         # (N, D)
+    arr    = np.array(samples)
     median = np.median(arr, axis=0)
     mad    = np.median(np.abs(arr - median), axis=0) + 1e-9
     mask   = np.all(np.abs(arr - median) <= k * mad, axis=1)
@@ -188,7 +186,7 @@ def reject_outliers(samples: list, k: float = 2.0) -> np.ndarray:
 
 
 # =============================================================
-# Threaded Camera (unchanged)
+# Threaded Camera
 # =============================================================
 class WebcamVideoStream:
     def __init__(self, src=0, width=1280, height=720):
@@ -236,34 +234,93 @@ EYE_RIGHT_BOTTOM = [374, 373, 390]
 SCREEN_WIDTH  = 1920
 SCREEN_HEIGHT = 1080
 
-# More calibration points → better generalisation at the edges
 CALIB_POINTS_NORM = [
-    (0.50, 0.50),                                           # centre
+    (0.50, 0.50),
     (0.50, 0.30), (0.50, 0.70),
-    (0.35, 0.50), (0.65, 0.50),                             # inner diamond
+    (0.35, 0.50), (0.65, 0.50),
     (0.05, 0.05), (0.95, 0.05),
-    (0.05, 0.95), (0.95, 0.95),                             # outer corners
+    (0.05, 0.95), (0.95, 0.95),
     (0.50, 0.01), (0.50, 0.99),
-    (0.01, 0.50), (0.99, 0.50),                             # edge mid-points
+    (0.01, 0.50), (0.99, 0.50),
     (0.25, 0.25), (0.75, 0.25),
-    (0.25, 0.75), (0.75, 0.75),                             # intermediate
+    (0.25, 0.75), (0.75, 0.75),
 ]
 
+# Drift correction uses just 5 points: centre + 4 corners.
+# Enough to capture the main affine drift without a long re-calibration.
+DRIFT_POINTS_NORM = [
+    (0.50, 0.50),
+    (0.05, 0.05), (0.95, 0.05),
+    (0.05, 0.95), (0.95, 0.95),
+]
+
+SAMPLES_NEEDED = 45   # per calibration point
+
+# =============================================================
+# Calibration state  (defined ONCE — not inside the loop)
+# =============================================================
 calib_index    = 0
-calib_features = []         # list of 7-D feature arrays
+calib_features = []   # averaged 11-D feature per point
+calib_targets  = []   # mirrors CALIB_POINTS_NORM order
+calib_weights  = []   # per-point confidence scalars   ← fixed: was inside loop
 calib_done     = False
 
-# Increase samples; outlier rejection means we can afford to be generous
-SAMPLES_NEEDED  = 45
 sampling_active = False
-sample_buffer   = []        # stores 7-D feature vectors during sampling
+sample_buffer   = []
 
 
 # =============================================================
-# MediaPipe Async Setup (unchanged)
+# Online Drift Correction  (NEW)
 # =============================================================
-latest_landmarks  = None
-landmark_lock     = threading.Lock()
+drift_corrections = []   # list of (feat_11d, [norm_x, norm_y])
+
+# How many drift samples before we trigger a retrain
+DRIFT_RETRAIN_EVERY = 1   # retrain after every new drift point
+
+
+def add_drift_correction(feat: np.ndarray, true_x_norm: float, true_y_norm: float):
+    """
+    Record one ground-truth fixation and retrain both models.
+
+    We keep the original calibration data plus all drift corrections,
+    then re-fit.  Drift corrections are up-weighted (3×) so recent
+    positional ground truth dominates over stale calibration data.
+    """
+    drift_corrections.append((feat.copy(), [true_x_norm, true_y_norm]))
+
+    # Keep a bounded window so very old drift data doesn't accumulate
+    max_drift = 30
+    if len(drift_corrections) > max_drift:
+        drift_corrections.pop(0)
+
+    # Build combined dataset
+    all_feats   = calib_features + [d[0] for d in drift_corrections]
+    all_targets = calib_targets  + [d[1] for d in drift_corrections]
+
+    # Drift corrections get higher weight than original calib points
+    drift_w = 3.0
+    all_weights = calib_weights + [
+        drift_w * max(calib_weights, default=1.0) for _ in drift_corrections
+    ]
+
+    fit_calibration(all_feats, all_targets, all_weights)
+    print(f"[Drift] Retrained with {len(all_feats)} points "
+          f"({len(drift_corrections)} drift fixes).")
+
+
+# Drift-correction session state
+drift_mode         = False   # True while collecting drift points
+drift_index        = 0       # which DRIFT_POINTS_NORM we're on
+drift_sampling     = False   # True while collecting frames for current point
+drift_sample_buf   = []      # raw feature vectors for current drift point
+DRIFT_SAMPLES_NEED = 30      # fewer samples than full calib — it's a quick fix
+
+
+# =============================================================
+# MediaPipe Async Setup
+# =============================================================
+latest_landmarks   = None
+landmark_lock      = threading.Lock()
 new_data_available = False
 
 
@@ -287,7 +344,7 @@ detector = vision.FaceLandmarker.create_from_options(options)
 
 
 # =============================================================
-# Eye Gaze Ratio (unchanged, EAR-based blink rejection)
+# Eye Gaze Ratio
 # =============================================================
 def get_eye_gaze_ratio(landmarks, iris_indices, outer, inner, top_ids, bottom_ids):
     iris_pts = [landmarks[i] for i in iris_indices]
@@ -303,45 +360,63 @@ def get_eye_gaze_ratio(landmarks, iris_indices, outer, inner, top_ids, bottom_id
     eye_h  = abs(bot_y - top_y)
 
     ear = eye_h / (eye_w + 1e-6)
-    if ear < 0.18:                     # blink → discard
+    if ear < 0.18:   # blink → discard
         return None, None
 
-    eye_cx = (lx + rx) / 2
-    eye_cy = (top_y + bot_y) / 2
+    eye_cx = (lx + rx) / 2.0
+    eye_cy = (top_y + bot_y) / 2.0
     return (cx - eye_cx) / (eye_w + 1e-6), (cy - eye_cy) / (eye_h + 1e-6)
+
+
+# =============================================================
+# Helper: draw a calibration/drift dot with progress ring
+# =============================================================
+def draw_target_dot(canvas, tx, ty, progress, label, total_label):
+    angle = int(360 * progress)
+    cv2.ellipse(canvas, (tx, ty), (22, 22), -90, 0, angle, (0, 255, 100), 3)
+    cv2.circle(canvas, (tx, ty), 12, (0, 200, 80), -1)
+    text = f"{label}  {total_label}"
+    cv2.putText(canvas, text,
+                ((SCREEN_WIDTH - 420) // 2, SCREEN_HEIGHT // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
 
 
 # =============================================================
 # Main Application
 # =============================================================
 cv2.namedWindow('Sandbox (Your Screen)', cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty('Sandbox (Your Screen)', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+cv2.setWindowProperty('Sandbox (Your Screen)', cv2.WND_PROP_FULLSCREEN,
+                       cv2.WINDOW_FULLSCREEN)
 cv2.namedWindow('Camera Feed')
 
 print("Starting camera thread…")
 vs = WebcamVideoStream(src=0, width=1280, height=720).start()
 time.sleep(1.0)
-print("Webcam ready. Look at each dot, press SPACE, then hold still.")
+print("Webcam ready.")
+print("  SPACE  → confirm calibration dot")
+print("  d      → start drift correction (5 quick dots, no full recalibration)")
+print("  r      → full recalibration")
+print("  q      → quit")
 
 kalman = KalmanGaze()
 
-# Current raw gaze & head pose (updated each open-eye frame)
 lrx = lry = rrx = rry = 0.0
 head_yaw = head_pitch = 0.0
 face_scale_val = 0.05
+current_feat   = None   # most recent 11-D feature (used by drift capture)
 
 smooth_x, smooth_y = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
-current_landmarks  = None
-last_frame_id      = -1
-display_image      = None
+current_landmarks   = None
+last_frame_id       = -1
+display_image       = None
 
 while True:
     current_frame_id = vs.frame_id
     sandbox = np.ones((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8) * 30
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
     # 1. Send new frame to MediaPipe
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
     if current_frame_id > last_frame_id:
         raw_frame = vs.read()
         if raw_frame is None:
@@ -360,9 +435,9 @@ while True:
 
     h, w = image.shape[:2]
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
     # 2. Consume latest ML result
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
     process_new_frame = False
     with landmark_lock:
         if new_data_available:
@@ -370,19 +445,17 @@ while True:
             new_data_available = False
             process_new_frame  = True
 
-    # ------------------------------------------------------------------
-    # 3. Update math only on fresh, open-eyed frames
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # 3. Compute features on fresh, open-eyed frames
+    # ----------------------------------------------------------------
     face_found = False
     if process_new_frame and current_landmarks:
         face_found = True
         lm_px = [(lm.x * w, lm.y * h) for lm in current_landmarks]
 
-        # IMPROVEMENT 1: head pose
         yaw, pitch, _ = get_head_pose(current_landmarks, w, h)
         fs             = get_face_scale(current_landmarks)
 
-        # IMPROVEMENT 2: per-eye ratios (not averaged)
         left_x,  left_y  = get_eye_gaze_ratio(
             lm_px, IRIS_LEFT,  EYE_LEFT_OUTER,  EYE_LEFT_INNER,
             EYE_LEFT_TOP,  EYE_LEFT_BOTTOM)
@@ -398,25 +471,24 @@ while True:
             head_yaw, head_pitch = yaw, pitch
             face_scale_val = fs
 
-            feat = build_feature(lrx, lry, rrx, rry,
-                                  head_yaw, head_pitch, face_scale_val)
+            current_feat = build_feature(lrx, lry, rrx, rry,
+                                         head_yaw, head_pitch, face_scale_val)
 
             if calib_done:
-                sx, sy = apply_calibration(feat)
-                raw_px = int(sx * SCREEN_WIDTH)
-                raw_py = int(sy * SCREEN_HEIGHT)
-
-                # IMPROVEMENT 5: Kalman filter
-                kx, ky = kalman.update(raw_px, raw_py)
+                sx, sy = apply_calibration(current_feat)
+                kx, ky = kalman.update(int(sx * SCREEN_WIDTH),
+                                       int(sy * SCREEN_HEIGHT))
                 smooth_x, smooth_y = int(kx), int(ky)
 
-            # Calibration sampling: store full feature vectors
+            # Fill sample buffers (calibration & drift use the same gate)
             if sampling_active:
-                sample_buffer.append(feat.tolist())
+                sample_buffer.append(current_feat.tolist())
+            if drift_sampling:
+                drift_sample_buf.append(current_feat.tolist())
 
-    # ------------------------------------------------------------------
-    # Draw iris dots on camera feed
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Draw iris dots
+    # ----------------------------------------------------------------
     if current_landmarks:
         lm_draw = [(lm.x * w, lm.y * h) for lm in current_landmarks]
         for idx_group in [IRIS_LEFT, IRIS_RIGHT]:
@@ -425,34 +497,31 @@ while True:
             icy  = int(sum(p[1] for p in pts) / len(pts))
             cv2.circle(image, (icx, icy), 4, (0, 215, 255), -1)
 
-    # ------------------------------------------------------------------
-    # Calibration UI
-    # ------------------------------------------------------------------
+    # ================================================================
+    # UI BRANCH A: Full calibration
+    # ================================================================
     if not calib_done:
         tx = int(CALIB_POINTS_NORM[calib_index][0] * SCREEN_WIDTH)
         ty = int(CALIB_POINTS_NORM[calib_index][1] * SCREEN_HEIGHT)
 
         if sampling_active:
-            if face_found:
-                pass   # sample_buffer filled above, inside eyes_open block
-
-            progress = len(sample_buffer) / SAMPLES_NEEDED
-            angle    = int(360 * progress)
-            cv2.ellipse(sandbox, (tx, ty), (22, 22), -90, 0, angle,
-                        (0, 255, 100), 3)
-            cv2.circle(sandbox, (tx, ty), 12, (0, 200, 80), -1)
-            cv2.putText(sandbox,
-                        f"Hold still…  {len(sample_buffer)}/{SAMPLES_NEEDED}",
-                        ((SCREEN_WIDTH - 400) // 2, SCREEN_HEIGHT // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+            draw_target_dot(sandbox, tx, ty,
+                            len(sample_buffer) / SAMPLES_NEEDED,
+                            "Hold still…",
+                            f"{len(sample_buffer)}/{SAMPLES_NEEDED}")
 
             if len(sample_buffer) >= SAMPLES_NEEDED:
-                # IMPROVEMENT 4: outlier rejection before averaging
-                clean = reject_outliers(sample_buffer, k=2.0)
-                avg   = clean.mean(axis=0)
+                clean      = reject_outliers(sample_buffer, k=2.0)
+                avg        = clean.mean(axis=0)
+                variance   = clean.var(axis=0).mean()
+                confidence = 1.0 / (variance + 1e-6)
+
                 calib_features.append(avg)
+                calib_targets.append(list(CALIB_POINTS_NORM[calib_index]))
+                calib_weights.append(confidence)
+
                 print(f"Point {calib_index+1} captured "
-                      f"({len(clean)}/{len(sample_buffer)} samples kept)  "
+                      f"({len(clean)}/{len(sample_buffer)} kept)  "
                       f"yaw={avg[4]*30:.1f}°  pitch={avg[5]*20:.1f}°")
 
                 sample_buffer.clear()
@@ -460,10 +529,11 @@ while True:
                 calib_index    += 1
 
                 if calib_index == len(CALIB_POINTS_NORM):
-                    fit_calibration(calib_features, CALIB_POINTS_NORM)
+                    fit_calibration(calib_features, calib_targets, calib_weights)
                     calib_done = True
                     kalman.reset()
                     print("Calibration complete! Tracking active.")
+                    print("Press 'd' to run a quick drift correction at any time.")
         else:
             pulse = int(10 + 6 * abs(np.sin(time.time() * 3)))
             cv2.circle(sandbox, (tx, ty), pulse + 6, (255, 255, 255), 2)
@@ -474,54 +544,131 @@ while True:
                         ((SCREEN_WIDTH - tsize[0]) // 2, SCREEN_HEIGHT // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 2)
 
+        # Draw all dot indicators
         for i, (px, py) in enumerate(CALIB_POINTS_NORM):
-            if   i < calib_index:   color, size = (0, 200, 0),     8
-            elif i == calib_index:  color, size = (255, 255, 255),  5
-            else:                   color, size = (80, 80, 80),     6
+            if   i < calib_index:   color, size = (0, 200, 0),    8
+            elif i == calib_index:  color, size = (255, 255, 255), 5
+            else:                   color, size = (80, 80, 80),    6
             cv2.circle(sandbox,
                        (int(px * SCREEN_WIDTH), int(py * SCREEN_HEIGHT)),
                        size, color, -1)
 
-    # ------------------------------------------------------------------
-    # Tracking UI
-    # ------------------------------------------------------------------
+    # ================================================================
+    # UI BRANCH B: Tracking (+ optional drift correction overlay)
+    # ================================================================
     else:
-        cv2.circle(sandbox, (smooth_x, smooth_y), 30, (0,   0, 100), -1)
-        cv2.circle(sandbox, (smooth_x, smooth_y), 18, (0,   0, 255), -1)
-        cv2.circle(sandbox, (smooth_x, smooth_y),  6, (255, 255, 255), -1)
+        # ------ Drift correction session --------------------------------
+        if drift_mode:
+            dx = int(DRIFT_POINTS_NORM[drift_index][0] * SCREEN_WIDTH)
+            dy = int(DRIFT_POINTS_NORM[drift_index][1] * SCREEN_HEIGHT)
 
-        cv2.putText(sandbox, "Press 'r' to recalibrate  |  'q' to quit",
-                    (20, SCREEN_HEIGHT - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 120, 120), 1)
-        cv2.putText(image, "Tracking Active — press 'r' to recalibrate",
+            # Small hint so user knows what's happening
+            hint = (f"Drift correction  ({drift_index+1}/{len(DRIFT_POINTS_NORM)}) "
+                    f"— look at dot, press SPACE")
+            cv2.putText(sandbox, hint,
+                        (20, SCREEN_HEIGHT - 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 220, 50), 2)
+
+            if drift_sampling:
+                draw_target_dot(sandbox, dx, dy,
+                                len(drift_sample_buf) / DRIFT_SAMPLES_NEED,
+                                "Hold still…",
+                                f"{len(drift_sample_buf)}/{DRIFT_SAMPLES_NEED}")
+
+                if len(drift_sample_buf) >= DRIFT_SAMPLES_NEED:
+                    # Reject outliers, average, record correction
+                    clean = reject_outliers(drift_sample_buf, k=2.0)
+                    avg   = clean.mean(axis=0)
+                    true_x, true_y = DRIFT_POINTS_NORM[drift_index]
+                    add_drift_correction(avg, true_x, true_y)
+
+                    drift_sample_buf.clear()
+                    drift_sampling = False
+                    drift_index   += 1
+
+                    if drift_index >= len(DRIFT_POINTS_NORM):
+                        # Done — exit drift mode
+                        drift_mode  = False
+                        drift_index = 0
+                        kalman.reset()   # reset Kalman so it re-locks quickly
+                        print("Drift correction complete.")
+            else:
+                # Waiting for SPACE
+                pulse = int(8 + 5 * abs(np.sin(time.time() * 3)))
+                cv2.circle(sandbox, (dx, dy), pulse + 5, (255, 220,  50), 2)
+                cv2.circle(sandbox, (dx, dy), pulse,     (200, 160,   0), -1)
+
+        # ------ Normal gaze dot -----------------------------------------
+        else:
+            cv2.circle(sandbox, (smooth_x, smooth_y), 30, (0,   0, 100), -1)
+            cv2.circle(sandbox, (smooth_x, smooth_y), 18, (0,   0, 255), -1)
+            cv2.circle(sandbox, (smooth_x, smooth_y),  6, (255, 255, 255), -1)
+
+            cv2.putText(sandbox,
+                        "Press 'd' to drift-correct  |  'r' to recalibrate  |  'q' to quit",
+                        (20, SCREEN_HEIGHT - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 120, 120), 1)
+
+        # Camera feed HUD (always shown during tracking)
+        cv2.putText(image, "Tracking Active — 'r' recalibrate  'd' drift fix",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(image,
-                    f"Gaze  L({lrx:.3f},{lry:.3f})  R({rrx:.3f},{rry:.3f})"
-                    f"  yaw={head_yaw:.1f}°  pitch={head_pitch:.1f}°",
-                    (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                    f"L({lrx:.3f},{lry:.3f})  R({rrx:.3f},{rry:.3f})"
+                    f"  yaw={head_yaw:.1f}°  pitch={head_pitch:.1f}°"
+                    f"  drift_fixes={len(drift_corrections)}",
+                    (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
     cv2.imshow('Sandbox (Your Screen)', sandbox)
     cv2.imshow('Camera Feed', image)
 
     key = cv2.waitKey(1) & 0xFF
 
+    # ----------------------------------------------------------------
+    # Key handling
+    # ----------------------------------------------------------------
     if key == ord('q'):
         break
+
     elif key == ord('r'):
+        # Full recalibration — reset everything
         calib_index    = 0
-        calib_features = []
+        calib_features.clear()
+        calib_targets.clear()
+        calib_weights.clear()
         calib_done     = False
         sampling_active = False
         sample_buffer.clear()
+        drift_mode     = False
+        drift_index    = 0
+        drift_sampling = False
+        drift_sample_buf.clear()
+        drift_corrections.clear()
         smooth_x, smooth_y = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
         kalman.reset()
         cv2.setWindowProperty('Sandbox (Your Screen)',
                                cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         print("Recalibrating…")
-    elif key == ord(' ') and not calib_done and not sampling_active:
-        sampling_active = True
-        sample_buffer.clear()
-        print(f"Sampling point {calib_index+1}… hold still!")
+
+    elif key == ord('d') and calib_done and not drift_mode:
+        # Start a quick drift-correction session
+        drift_mode     = True
+        drift_index    = 0
+        drift_sampling = False
+        drift_sample_buf.clear()
+        print("Drift correction started — look at each yellow dot and press SPACE.")
+
+    elif key == ord(' '):
+        if not calib_done and not sampling_active:
+            # Calibration: start sampling current dot
+            sampling_active = True
+            sample_buffer.clear()
+            print(f"Sampling calibration point {calib_index+1}… hold still!")
+
+        elif calib_done and drift_mode and not drift_sampling:
+            # Drift: start sampling current drift dot
+            drift_sampling = True
+            drift_sample_buf.clear()
+            print(f"Sampling drift point {drift_index+1}… hold still!")
 
 vs.stop()
 detector.close()
