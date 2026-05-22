@@ -163,6 +163,99 @@ def predict_stretched(feat):
     rx,ry=predict(feat); return stretcher.apply(rx,ry)
 
 # =============================================================
+# Session history — persists calibration data across runs
+# =============================================================
+HISTORY_FILE = 'calibration_history.npz'
+MAX_HISTORY_SESSIONS = 20   # keep at most this many sessions
+
+def save_session(features, targets):
+    """Append this session's data to the history file."""
+    features = np.array(features, dtype=np.float64)
+    targets  = np.array(targets,  dtype=np.float64)
+
+    fs_mean = float(features[:, 6].mean())
+    if fs_mean > 1e-6:
+        features = features.copy()
+        features[:, 6] /= fs_mean
+
+    if Path(HISTORY_FILE).exists():
+        d        = np.load(HISTORY_FILE, allow_pickle=True)
+        old_f    = d['features']
+        old_t    = d['targets']
+        old_sid  = d['session_id'].astype(np.int32)
+        old_fs   = list(d['fs_means'])
+        next_id  = int(old_sid[-1]) + 1
+        # split into per-session lists for trimming
+        sessions = list(np.unique(old_sid))
+        sess_f   = [old_f[old_sid == s] for s in sessions]
+        sess_t   = [old_t[old_sid == s] for s in sessions]
+        sess_s   = [np.full(int((old_sid==s).sum()), int(s), dtype=np.int32) for s in sessions]
+        all_fs   = old_fs
+    else:
+        sess_f, sess_t, sess_s, all_fs = [], [], [], []
+        next_id  = 1
+
+    sess_f.append(features)
+    sess_t.append(targets)
+    sess_s.append(np.full(len(features), next_id, dtype=np.int32))
+    all_fs.append(fs_mean)
+
+    if len(sess_f) > MAX_HISTORY_SESSIONS:
+        sess_f = sess_f[-MAX_HISTORY_SESSIONS:]
+        sess_t = sess_t[-MAX_HISTORY_SESSIONS:]
+        sess_s = sess_s[-MAX_HISTORY_SESSIONS:]
+        all_fs = all_fs[-MAX_HISTORY_SESSIONS:]
+
+    np.savez_compressed(HISTORY_FILE,
+        features   = np.vstack(sess_f),
+        targets    = np.vstack(sess_t),
+        session_id = np.concatenate(sess_s).astype(np.int32),
+        fs_means   = np.array(all_fs, dtype=np.float64))
+
+    total = sum(len(f) for f in sess_f)
+    print(f"[History] Saved session {next_id} — {len(features)} pts. "
+          f"Total history: {total} pts across {len(sess_f)} sessions.")
+
+
+def load_history(current_features, current_targets, current_weights):
+    """
+    Merge history with current session data.
+    Returns (features, targets, weights) ready for fit_calibration().
+    Recent sessions get higher weight; current session highest.
+    """
+    history_file = HISTORY_FILE
+    if not Path(history_file).exists():
+        return current_features, current_targets, current_weights
+
+    d          = np.load(history_file, allow_pickle=True)
+    hist_f     = d['features']
+    hist_t     = d['targets']
+    hist_s     = d['session_id']
+    sessions   = np.unique(hist_s)
+    n_sessions = len(sessions)
+
+    # Weight: oldest session = 0.3, newest history = 0.7, current = 1.0
+    hist_w = []
+    for sid in hist_s:
+        rank      = np.where(sessions == sid)[0][0]           # 0 = oldest
+        w         = 0.3 + 0.4 * (rank / max(n_sessions-1, 1)) # 0.3 → 0.7
+        hist_w.append(w)
+
+    all_f = list(hist_f) + list(current_features)
+    all_t = list(hist_t) + list(current_targets)
+    all_w = hist_w       + [1.0] * len(current_features)   # current = weight 1.0
+
+    # Scale current weights by their confidence values
+    if current_weights:
+        cw_arr = np.array(current_weights); cw_arr = cw_arr / cw_arr.max()
+        all_w[-len(current_features):] = cw_arr.tolist()
+
+    print(f"[History] Using {len(hist_f)} history pts + {len(current_features)} current pts "
+          f"({n_sessions} past sessions).")
+    return all_f, all_t, all_w
+
+
+# =============================================================
 # Outlier rejection  (v1)
 # =============================================================
 def reject_outliers(samples,k=2.0):
@@ -269,6 +362,7 @@ def wrap_text(text,n=82):
     if line: lines.append(line)
     return lines
 
+
 # =============================================================
 # Calibration points  (PDF-optimised)
 # =============================================================
@@ -307,6 +401,8 @@ def main():
 
     if not Path(args.pdf).exists(): print(f"[ERROR] PDF not found: {args.pdf}"); sys.exit(1)
     if not Path(args.model).exists(): print("[ERROR] face_landmarker.task not found"); sys.exit(1)
+
+
 
     # MediaPipe
     det=vision.FaceLandmarker.create_from_options(
@@ -427,8 +523,12 @@ def main():
                         if ci==len(CALIB_PTS):
                             _tr["v"]=True
                             def _train():
-                                fit_calibration(cf,ct,cw)
-                                stretcher.fit(cf,ct)
+                                # Merge with history from previous sessions
+                                all_f, all_t, all_w = load_history(cf, ct, cw)
+                                fit_calibration(all_f, all_t, all_w)
+                                stretcher.fit(all_f, all_t)
+                                # Save this session to history for future runs
+                                save_session(cf, ct)
                                 kalman.reset()
                                 calib_done.set()
                                 _tr["v"]=False
