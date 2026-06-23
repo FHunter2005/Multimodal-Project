@@ -461,91 +461,70 @@ class LocalEpistemicTracker:
 
     # ── BOREDOM ───────────────────────────────────────────────────────────────
 
+    # ── BOREDOM ───────────────────────────────────────────────────────────────
+
     def _score_boredom(self, st: _Stats, n: int) -> float:
         """
-        Boredom = eyes looking down + far from screen + relaxed/slack face.
-        NOT the same as tiredness (no drooping lids required).
-        Physiological picture: person has leaned back in chair, gaze dropped
-        to desk or lap, face completely neutral, minimal head movement.
+        7 sub-signals for Boredom based on affective computing heuristics:
+        Includes eyes looking down, ptosis (heavy eyelids), slack face/jaw,
+        physical distancing, and head drop.
         """
 
-        # [1] Eyes looking DOWN — direct gaze-direction blendshapes.
-        #     eyeLookDownLeft/Right score ~0.6–1.0 when gaze is clearly below
-        #     screen level.  Threshold at 0.25 (subtle downward cast = onset).
-        eyes_down = _clip01(
-            st.avg_m("eyeLookDownLeft", "eyeLookDownRight") / 0.40
-        )
+        # [1] Eyes looking DOWN — gaze cast below the screen
+        eyes_down = _clip01(st.avg_m("eyeLookDownLeft", "eyeLookDownRight") / 0.40)
 
-        # [2] Face slack — overall AU activity very low.
-        #     Compute mean of per-key standard deviations across the window;
-        #     a relaxed face barely moves any AU, so variance is near zero.
-        #     Exclude gaze keys (they move without expression) and pose keys.
-        expression_keys = [
-            k for k in _BS_KEYS
-            if not k.startswith("eyeLook")
-        ]
-        expr_var = float(np.mean([
-            st.col(k).std() for k in expression_keys
-        ]))
-        # Also check mean AU magnitudes are low (not just stable)
-        expr_mu  = float(np.mean([
-            st.m(k) for k in expression_keys
-        ]))
+        # [2] Heavy Eyelids (Ptosis) — partial closure, slowed blinks
+        # eyeBlink normally near 0.0. If hovering around 0.15-0.40, lids are drooping.
+        # Score decreases if it goes too high (which means eyes are fully shut/sleeping)
+        blinks = st.avg_m("eyeBlinkLeft", "eyeBlinkRight")
+        heavy_eyelids = _clip01(blinks / 0.15) * _clip01(1.0 - (blinks - 0.30) / 0.40)
+
+        # [3] Face slack — overall AU activity (excluding blinks/gaze) is very low
+        expression_keys = [k for k in _BS_KEYS if not k.startswith("eyeLook") and "Blink" not in k]
+        expr_var = float(np.mean([st.col(k).std() for k in expression_keys]))
+        expr_mu  = float(np.mean([st.m(k) for k in expression_keys]))
         face_slack = _clip01(1.0 - expr_var / 0.055) * _clip01(1.0 - expr_mu / 0.08)
 
-        # [3] Mouth slack — jaw loosely hanging, not clenched, not open wide.
-        #     mouthClose low (lips parted slightly), jawOpen very low (not yawning),
-        #     no mouthPress (not tense).
+        # [4] Mouth slack — jaw loosely hanging (not clenched, not yawning)
         mouth_close_mu = st.m("mouthClose")
         jaw_open_mu    = st.m("jawOpen")
         lip_press_mu   = st.avg_m("mouthPressLeft", "mouthPressRight")
-        # Score highest when: mouthClose ≈ 0.05–0.15, jawOpen < 0.10, no lip press
         mouth_slack = (
-            _clip01(1.0 - mouth_close_mu / 0.30) *      # not clenched
-            _clip01(1.0 - jaw_open_mu    / 0.20) *      # not yawning wide
-            _clip01(1.0 - lip_press_mu   / 0.10)        # not tense
+            _clip01(1.0 - mouth_close_mu / 0.30) * _clip01(1.0 - jaw_open_mu    / 0.20) * _clip01(1.0 - lip_press_mu   / 0.10)
         )
 
-        # [4] Far from screen — face_scale (inter-eye / face-width ratio) is SMALL.
-        #     Typical values: close ~0.45–0.55, normal ~0.32–0.42, far ~0.20–0.30.
-        #     Score rises as face_scale drops below 0.35.
-        #     Requires pose data; falls back gracefully.
+        # [5] Far from screen — face_scale is small (leaning back in chair)
         if self._has_pose:
-            fscale_mu = st.m("face_scale")   # already raw (not normalised)
-            # Score: 0 at 0.38+, 1.0 at 0.20 and below
+            fscale_mu = st.m("face_scale")
             far_from_screen = _clip01((0.38 - fscale_mu) / 0.18)
         else:
             far_from_screen = 0.0
 
-        # [5] Lean-back — face_scale negative trend (actively moving away).
-        #     Complements far_from_screen: catches the transition, not just steady state.
+        # [6] Head drop (Chin Drop) — pitch is significantly positive (tilted down)
+        # Normalised pitch: 1.0 = 30 degrees. Score rises as head drops below 10 degrees.
         if self._has_pose:
-            fscale_trend = st.t("face_scale")   # negative = shrinking = moving back
-            lean_back = _clip01(-fscale_trend / 0.0012)
+            pitch_mu = st.m("pitch")
+            head_drop = _clip01(pitch_mu / 0.40) 
         else:
-            lean_back = 0.0
+            head_drop = 0.0
 
-        # [6] Relaxed posture — low head movement + pitch/roll near zero.
-        #     Bored person is STILL (unlike frustrated), sitting upright or slightly
-        #     reclined, not drooping forward.
+        # [7] Stillness (Lack of micro-nods) — highly rigid/slumped posture
         if self._has_pose:
-            head_still   = _clip01(1.0 - (st.s("yaw") + st.s("pitch")) / 0.07)
-            # Pitch near zero = upright; large positive pitch = drooping (not boredom here)
-            head_upright = _clip01(1.0 - abs(st.m("pitch")) / 0.30)
-            relaxed_posture = head_still * head_upright
+            head_still = _clip01(1.0 - (st.s("yaw") + st.s("pitch")) / 0.07)
         else:
-            relaxed_posture = 0.0
+            head_still = 0.0
 
+        # Weights sum to 1.0
         subs = {
-            "eyes_down":      (0.28, eyes_down),
-            "face_slack":     (0.22, face_slack),
-            "mouth_slack":    (0.12, mouth_slack),
-            "far_screen":     (0.18, far_from_screen),
-            "lean_back":      (0.10, lean_back),
-            "relaxed_posture":(0.10, relaxed_posture),
+            "eyes_down":      (0.20, eyes_down),
+            "heavy_eyelids":  (0.15, heavy_eyelids),
+            "face_slack":     (0.15, face_slack),
+            "mouth_slack":    (0.15, mouth_slack),
+            "far_screen":     (0.15, far_from_screen),
+            "head_drop":      (0.10, head_drop),
+            "head_still":     (0.10, head_still),
         }
         return _clip01(sum(w * v for w, v in subs.values()))
-
     # ── CONCENTRATION ─────────────────────────────────────────────────────────
 
     def _score_concentration(self, st: _Stats, n: int) -> float:
@@ -674,7 +653,7 @@ class LocalEpistemicTracker:
         return {
             "Concentration": "mild furrow · still · eyes open",
             "Confusion":     "inner brow · tilt · lean-in",
-            "Boredom":       "eyes down · far from screen · relaxed face",
+            "Boredom":       "eyes down · heavy lids · slack jaw · head drop", # UPDATED
             "Frustration":   "hard furrow · lip press · agitation",
         }.get(state, "")
 
