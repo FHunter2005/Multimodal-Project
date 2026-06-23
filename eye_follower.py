@@ -19,7 +19,7 @@ from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.ensemble import GradientBoostingRegressor
 from local_epistemic_tracker import LocalEpistemicTracker
 from emotion_wheel import EmotionDetector, PlutchikWheel
-
+from mouse_analyzer import MouseReadingAnalyzer
 import requests
 # =============================================================
 # (EXISTING GAZE TRACKER CODE CONTINUES)
@@ -189,7 +189,8 @@ emotion_wheel = PlutchikWheel(width=WHEEL_W, height=WHEEL_H)
 
 # --- Initialize Local Epistemic Tracker ---
 epistemic_tracker = LocalEpistemicTracker()
-
+mouse_tracker = MouseReadingAnalyzer(window_size=3.0)
+mouse_tracker.start()
 lrx = lry = rrx = rry = head_yaw = head_pitch = face_scale_val = 0.0
 current_feat, smooth_x, smooth_y = None, SANDBOX_W // 2, SANDBOX_H // 2
 current_landmarks, current_blendshapes, last_frame_id, display_image = None, None, -1, None
@@ -318,7 +319,18 @@ while True:
     dashboard[0:SANDBOX_H, 0:SANDBOX_W] = sandbox                     # Left
     dashboard[0:WHEEL_H, SANDBOX_W:1920] = wheel_canvas               # Top Right
     dashboard[WHEEL_H:1080, SANDBOX_W:1920] = epistemic_canvas        # Bottom Right
-
+    mouse_score = mouse_tracker.get_score()
+    # NEW: Draw Mouse Modality HUD over the bottom-left of the sandbox
+    hud_x, hud_y = 30, SANDBOX_H - 100
+    cv2.rectangle(dashboard, (hud_x - 10, hud_y - 40), (hud_x + 350, hud_y + 30), (30, 30, 30), -1)
+    cv2.putText(dashboard, f"Mouse PAR Score: {mouse_score:.2f}", (hud_x, hud_y - 10), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    
+    # Draw a visual progress bar for the score
+    bar_width = 300
+    filled_width = int(bar_width * mouse_score)
+    cv2.rectangle(dashboard, (hud_x, hud_y + 5), (hud_x + bar_width, hud_y + 15), (100, 100, 100), -1)
+    cv2.rectangle(dashboard, (hud_x, hud_y + 5), (hud_x + filled_width, hud_y + 15), (0, 255, 100), -1)
     cv2.imshow('Gaze & Emotion Dashboard', dashboard)
 
     key = cv2.waitKey(1) & 0xFF
@@ -338,4 +350,5 @@ while True:
 
 vs.stop()
 detector.close()
+mouse_tracker.stop()
 cv2.destroyAllWindows()
