@@ -1,14 +1,13 @@
 """
 Refactored Multimodal Reader Helper Dashboard
 ====================================================================
-Architecture (PURE MATH TRACKING):
-- Analyzers: Gaze, Emotion, Epistemic, Mouse
+Architecture (PURE MATH + ATTENTION FUSION):
+- Analyzers: Gaze, Emotion, Epistemic, Mouse, Fused Attention
 - Upgrades: 
-  1. 13-Point "Reading Box" Polynomial Regression
-  2. Pre-Regression Moving Average (Kills input noise)
-  3. Fixation Deadzone (Locks cursor tight on words)
-  4. Mathematical Head Pose Compensation
-  5. Dynamic Blink Filtering
+  1. Probabilistic Attention Fuser (Mouse, Viewport, Head, Eyes)
+  2. Context-Aware Paragraph Tracking
+  3. Pre-Regression Moving Average
+  4. Fixation Deadzone
 """
 
 import cv2
@@ -16,6 +15,7 @@ import time
 import numpy as np
 import mediapipe as mp
 import threading
+import pyautogui # NEW: For global mouse tracking
 from collections import deque
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -25,40 +25,33 @@ from emotion_wheel import EmotionDetector, PlutchikWheel
 from mouse_analyzer import MouseReadingAnalyzer
 from gaze_analyzer import GazeReadingAnalyzer
 
+pyautogui.FAILSAFE = False
+
 # =============================================================
 # 1. CORE TRACKER HELPERS & CONSTANTS
 # =============================================================
 SCREEN_W, SCREEN_H = 1920, 1080
 SANDBOX_W, SANDBOX_H, WHEEL_W, WHEEL_H = 1280, 1080, 640, 540
 
-# --- NEW: 13-Point "Reader's Grid" ---
 CALIB_POINTS_NORM = [
-    # Outer Edge Box
     (0.05, 0.05), (0.5, 0.05), (0.95, 0.05),
     (0.05, 0.5),               (0.95, 0.5),
     (0.05, 0.95), (0.5, 0.95), (0.95, 0.95),
-    # Inner PDF Reading Box (Crucial for high accuracy reading)
     (0.3, 0.3), (0.7, 0.3),
     (0.3, 0.7), (0.7, 0.7),
-    # Dead Center
     (0.5, 0.5)
 ]
-# Lowered to 10 so calibration doesn't take forever with 13 points
 SAMPLES_NEEDED = 10 
-
-# --- NEW: Smoothing Tunings ---
-  # Jump Kalman if movement > 12% of screen
-FIXATION_DEADZONE = 0.015  # Freeze cursor completely if movement < 1.5% of screen (~28 pixels)
-
+FIXATION_DEADZONE = 0.015  
 BLINK_EAR_THRESHOLD = 0.16
 
 _HEAD_3D = np.array([
-    [0.0, 0.0, 0.0],           # 1: Nose
-    [0.0, -330.0, -65.0],      # 152: Chin
-    [-225.0, 170.0, -135.0],   # 33: Left Eye Outer
-    [225.0, 170.0, -135.0],    # 263: Right Eye Outer
-    [-150.0, -150.0, -125.0],  # 61: Left Mouth
-    [150.0, -150.0, -125.0]    # 291: Right Mouth
+    [0.0, 0.0, 0.0],           
+    [0.0, -330.0, -65.0],      
+    [-225.0, 170.0, -135.0],   
+    [225.0, 170.0, -135.0],    
+    [-150.0, -150.0, -125.0],  
+    [150.0, -150.0, -125.0]    
 ], dtype=np.float64)
 _HEAD_IDX = [1, 152, 33, 263, 61, 291] 
 
@@ -66,8 +59,7 @@ IRIS_LEFT, EYE_LEFT_OUTER, EYE_LEFT_INNER, EYE_LEFT_TOP, EYE_LEFT_BOTTOM = [474,
 IRIS_RIGHT, EYE_RIGHT_OUTER, EYE_RIGHT_INNER, EYE_RIGHT_TOP, EYE_RIGHT_BOTTOM = [469, 470, 471, 472], 362, 263, [386, 387, 388], [374, 373, 390]
 
 class KalmanGaze:
-    # Increased measurement noise so Kalman drags a bit more smoothly
-    def __init__(self, process_noise=1e-4, measurement_noise=1e-1, dt=1/30):
+    def __init__(self, process_noise=1e-3, measurement_noise=5e-2, dt=1/30):
         self.kf = cv2.KalmanFilter(4, 2)
         self.kf.transitionMatrix = np.array([[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]], dtype=np.float32)
         self.kf.measurementMatrix = np.array([[1,0,0,0],[0,1,0,0]], dtype=np.float32)
@@ -84,7 +76,7 @@ class KalmanGaze:
     def reset(self): self._initialized = False
 
 class GazeHeatmap:
-    def __init__(self, width=SCREEN_W, height=SCREEN_H, blob_sigma=55.0, decay=0.8, alpha=0.55):
+    def __init__(self, width=SCREEN_W, height=SCREEN_H, blob_sigma=55.0, decay=0.60, alpha=0.55):
         self.w, self.h, self.decay, self.alpha, self.acc = width, height, decay, alpha, np.zeros((height, width), dtype=np.float32)
         r = int(blob_sigma * 3.5); ax = np.arange(-r, r + 1, dtype=np.float32); xx, yy = np.meshgrid(ax, ax)
         kernel = np.exp(-(xx**2 + yy**2) / (2.0 * blob_sigma**2)); self._kernel, self._r = (kernel / kernel.max()).astype(np.float32), r
@@ -164,8 +156,22 @@ class DialogController:
         self.struggle_frames = 0
         self.help_active = False
         self.system_message = "Listening to User State..."
+        
+        # Fused Attention Weights
+        self.W_EYE = 0.10
+        self.W_HEAD = 0.20
+        self.W_VIEWPORT = 0.30
+        self.W_MOUSE = 0.40
 
-    def evaluate(self, mouse_score, gaze_score, epistemic_state, emotion_scores):
+    def estimate_attention(self, eye_y, mouse_y, head_y, viewport_y):
+        """Fuses 4 tracking systems to pinpoint the target paragraph on the document."""
+        fused_doc_y = (eye_y * self.W_EYE) + (head_y * self.W_HEAD) + (viewport_y * self.W_VIEWPORT) + (mouse_y * self.W_MOUSE)
+        
+        # Calculate paragraph index based on dummy doc layout (Starts at 240, 150px per para)
+        para_idx = int(max(1, min(18, (fused_doc_y - 240) // 150 + 1)))
+        return fused_doc_y, para_idx
+
+    def evaluate(self, mouse_score, gaze_score, epistemic_state, emotion_scores, active_para):
         confusion = epistemic_state.get('confusion', 0.0) if isinstance(epistemic_state, dict) else 0.0
         anger = emotion_scores.get('anger', 0.0) if isinstance(emotion_scores, dict) else 0.0
         sadness = emotion_scores.get('sadness', 0.0) if isinstance(emotion_scores, dict) else 0.0
@@ -188,9 +194,14 @@ class DialogController:
         
         if self.struggle_frames > TRIGGER_THRESHOLD and not self.help_active:
             self.help_active = True
-            if plutchik_frustration > confusion: self.system_message = "INTERVENTION: High Frustration. Take a deep breath or a short break."
-            elif gaze_score > 0.6: self.system_message = "INTERVENTION: High Cognitive Load. Would you like a simpler summary?"
-            else: self.system_message = "INTERVENTION: You seem confused. Here is a definition of the complex term."
+            
+            # --- Context Aware Interventions ---
+            if plutchik_frustration > confusion: 
+                self.system_message = f"INTERVENTION: High Frustration on Paragraph {active_para}. Take a short break."
+            elif gaze_score > 0.6: 
+                self.system_message = f"INTERVENTION: High Cognitive Load. Simplifying Paragraph {active_para} for you..."
+            else: 
+                self.system_message = f"INTERVENTION: You seem confused. Generating context tip for Paragraph {active_para}..."
                 
         elif self.struggle_frames == 0 and self.help_active:
             self.help_active = False
@@ -201,7 +212,8 @@ class DialogController:
             "message": self.system_message,
             "struggle_level": min(1.0, self.struggle_frames / float(TRIGGER_THRESHOLD)),
             "gaze_score": gaze_score,
-            "face_score": face_struggle
+            "face_score": face_struggle,
+            "active_para": active_para
         }
 
     def reset_intervention(self):
@@ -226,7 +238,10 @@ class ReaderHelperApp:
         self.mouse_tracker = MouseReadingAnalyzer()
         self.gaze_tracker = GazeReadingAnalyzer(window_size=5.0)
         self.dialog_controller = DialogController()
+        
         self.current_gaze_score = 0.0
+        self.fused_attention_y = 0.0
+        self.active_paragraph = 1
         
         self.inference_mode = False
         self.scroll_y = 0
@@ -245,9 +260,8 @@ class ReaderHelperApp:
 
         self.smooth_x, self.smooth_y = self.SCREEN_W // 2, self.SCREEN_H // 2
         
-        # --- NEW: Pre-Regression Smoothing Queues ---
-        self.raw_x_history = deque(maxlen=5) 
-        self.raw_y_history = deque(maxlen=5)
+        self.raw_x_history = deque(maxlen=3) 
+        self.raw_y_history = deque(maxlen=3)
         
         self.raw_eye_x = self.raw_eye_y = 0.5
         
@@ -309,7 +323,7 @@ class ReaderHelperApp:
         print("Calibration Complete: 13-Point Reader Curve Fitted.")
 
     def run(self):
-        print("Starting Smooth Math Reader Helper Baseline…")
+        print("Starting Probabilistic Attention Reader Dashboard…")
         time.sleep(1.0)
         cv2.namedWindow('Gaze & Emotion Dashboard', cv2.WND_PROP_FULLSCREEN)
         cv2.setWindowProperty('Gaze & Emotion Dashboard', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -328,9 +342,7 @@ class ReaderHelperApp:
             if raw_frame is not None:
                 self.display_image = cv2.flip(raw_frame, 1)
                 
-                # Bypass heavy CLAHE processing to instantly restore FPS
                 image_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
-
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
                 self.detector.detect_async(mp_image, int(time.time() * 1000))
                 self.last_frame_id = current_frame_id
@@ -355,17 +367,30 @@ class ReaderHelperApp:
             self.epistemic_tracker.update(bs)
             epistemic_state = getattr(self.epistemic_tracker, 'current_state', {}) 
 
+        # --- FUSED ATTENTION TRACKING VARIABLES ---
+        head_doc_y = self.scroll_y + (self.SCREEN_H // 2) # Default if undetected
+        mouse_x, mouse_y = pyautogui.position()
+        viewport_doc_y = self.scroll_y + (self.SCREEN_H // 2)
+        mouse_doc_y = mouse_y + self.scroll_y
+
         if process_new_frame and lm:
+            # 1. Head Pose Extraction
             R = get_head_rotation_matrix(lm, w, h)
             unrotated_lm_px = unrotate_face(lm, R, w, h)
             
+            # Map head pitch via the relative position of the nose in the webcam frame
+            # If the nose moves down the camera frame, the user is looking lower on the screen.
+            nose_y_norm = np.clip((lm[1].y - 0.35) / 0.4, 0.0, 1.0) 
+            head_screen_y = nose_y_norm * self.SCREEN_H
+            head_doc_y = head_screen_y + self.scroll_y
+
+            # 2. Eye Tracking Extraction
             left_x, left_y, left_ear = get_eye_gaze_ratio(unrotated_lm_px, IRIS_LEFT, EYE_LEFT_OUTER, EYE_LEFT_INNER, EYE_LEFT_TOP, EYE_LEFT_BOTTOM)
             right_x, right_y, right_ear = get_eye_gaze_ratio(unrotated_lm_px, IRIS_RIGHT, EYE_RIGHT_OUTER, EYE_RIGHT_INNER, EYE_RIGHT_TOP, EYE_RIGHT_BOTTOM)
 
             if left_x is not None and right_x is not None:
                 avg_ear = (left_ear + right_ear) / 2.0
                 
-                # Pre-regression averaging to kill MediaPipe micro-jitter
                 instant_raw_x = (left_x + right_x) / 2.0
                 instant_raw_y = (left_y + right_y) / 2.0
                 
@@ -388,44 +413,26 @@ class ReaderHelperApp:
 
                 if len(self.blink_history) > 100:
                     perclos_score = sum(self.blink_history) / len(self.blink_history)
-                    
-                    if perclos_score > 0.15: # Eyes closed more than 15% of the time
-                        self.dialog_controller.system_message = "INTERVENTION: High Fatigue Detected. Consider a screen break."
+                    if perclos_score > 0.15: 
+                        self.dialog_controller.system_message = f"INTERVENTION: High Fatigue Detected. Consider a screen break."
                         self.dialog_controller.help_active = True
+                
                 if self.sampling_active and not self.is_blinking: 
                     self.sample_buffer.append([self.raw_eye_x, self.raw_eye_y])
+                
                 if self.calib_done:
-                    # 1. Run raw eye ratio through Kalman filter
                     smooth_raw_x, smooth_raw_y = self.kalman.update(self.raw_eye_x, self.raw_eye_y)
-
-                    # 2. Build feature matrix using the smoothed, stable input
-                    feat = np.array([
-                        1, 
-                        smooth_raw_x, 
-                        smooth_raw_y, 
-                        smooth_raw_x**2, 
-                        smooth_raw_y**2, 
-                        smooth_raw_x * smooth_raw_y
-                    ])
+                    feat = np.array([1, smooth_raw_x, smooth_raw_y, smooth_raw_x**2, smooth_raw_y**2, smooth_raw_x * smooth_raw_y])
                     
-                    # 3. Calculate Normalized Screen Coordinates
-                    norm_x = float(np.dot(feat, self.calib_coeffs_x))
-                    norm_y = float(np.dot(feat, self.calib_coeffs_y))
+                    norm_x = float(np.clip(float(np.dot(feat, self.calib_coeffs_x)), 0.0, 1.0))
+                    norm_y = float(np.clip(float(np.dot(feat, self.calib_coeffs_y)), 0.0, 1.0))
                     
-                    # 4. Clamp for safety
-                    norm_x = float(np.clip(norm_x, 0.0, 1.0))
-                    norm_y = float(np.clip(norm_y, 0.0, 1.0))
-                    
-                    # 5. Apply Fixation Deadzone (The "Lock" feeling)
-                    # If movement is tiny, ignore it to keep cursor rock-solid
                     if self.prev_norm_x is not None and not self.is_blinking:
                         dist = np.hypot(norm_x - self.prev_norm_x, norm_y - self.prev_norm_y)
                         if dist < FIXATION_DEADZONE:
                             norm_x, norm_y = self.prev_norm_x, self.prev_norm_y
                     
                     self.prev_norm_x, self.prev_norm_y = norm_x, norm_y
-
-                    # 6. Smooth update for screen position
                     self.smooth_x = int(norm_x * self.SCREEN_W)
                     self.smooth_y = int(norm_y * self.SCREEN_H)
                     
@@ -434,7 +441,15 @@ class ReaderHelperApp:
             else:
                 self.current_gaze_score = 0.0
 
-        system_action = self.dialog_controller.evaluate(mouse_score, self.current_gaze_score, epistemic_state, emotion_state)
+        # --- CALCULATE FINAL ATTENTION ---
+        eye_doc_y = self.smooth_y + self.scroll_y
+        self.fused_attention_y, self.active_paragraph = self.dialog_controller.estimate_attention(
+            eye_y=eye_doc_y, mouse_y=mouse_doc_y, head_y=head_doc_y, viewport_y=viewport_doc_y
+        )
+
+        system_action = self.dialog_controller.evaluate(
+            mouse_score, self.current_gaze_score, epistemic_state, emotion_state, self.active_paragraph
+        )
 
         # =============================================================
         # RENDERING
@@ -444,13 +459,18 @@ class ReaderHelperApp:
             self.scroll_y = max(0, min(self.scroll_y, max_scroll))
             view = self.dummy_doc[self.scroll_y : self.scroll_y + 1080, :, :].copy()
 
+            # Draw the Fused Attention Horizon Line
+            screen_attention_y = int(self.fused_attention_y - self.scroll_y)
+            cv2.line(view, (360, screen_attention_y), (1560, screen_attention_y), (0, 150, 255), 2)
+            cv2.putText(view, f"FUSED ATTENTION (Para {self.active_paragraph})", (1250, screen_attention_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 150, 255), 1)
+
             if system_action['help_active']:
                 cx, cy = self.SCREEN_W // 2, self.SCREEN_H // 2
-                cv2.rectangle(view, (cx - 380, cy - 100), (cx + 380, cy + 120), (150, 150, 150), 4)
-                cv2.rectangle(view, (cx - 380, cy - 100), (cx + 380, cy + 120), (250, 250, 255), -1)
-                cv2.putText(view, "READER HELPER", (cx - 350, cy - 50), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 100, 200), 2)
-                cv2.line(view, (cx - 350, cy - 35), (cx + 350, cy - 35), (200, 200, 200), 2)
-                cv2.putText(view, system_action['message'], (cx - 350, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
+                cv2.rectangle(view, (cx - 450, cy - 100), (cx + 450, cy + 120), (150, 150, 150), 4)
+                cv2.rectangle(view, (cx - 450, cy - 100), (cx + 450, cy + 120), (250, 250, 255), -1)
+                cv2.putText(view, "CONTEXTUAL READER HELPER", (cx - 420, cy - 50), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 100, 200), 2)
+                cv2.line(view, (cx - 420, cy - 35), (cx + 420, cy - 35), (200, 200, 200), 2)
+                cv2.putText(view, system_action['message'], (cx - 420, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
                 cv2.putText(view, "[Press 'C' to clear and continue reading]", (cx - 150, cy + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
 
             cv2.putText(view, "INFERENCE MODE ACTIVE", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 150, 0), 2)
@@ -459,8 +479,8 @@ class ReaderHelperApp:
             if self.is_blinking:
                 cv2.putText(view, "BLINK DETECTED - COORDS FROZEN", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
+            # Draw the Raw Eye Tracking Point (so you can see how it differs from the Fused Horizon Line)
             cv2.circle(view, (self.smooth_x, self.smooth_y), 5, (0, 0, 255), -1)
-
             cv2.imshow('Gaze & Emotion Dashboard', view)
 
         else:
@@ -527,7 +547,7 @@ class ReaderHelperApp:
         cv2.rectangle(canvas, (hud_x - 10, hud_y - 40), (hud_x + 550, hud_y + 100), (40, 40, 40), -1)
         
         color = (0, 100, 255) if action_state["help_active"] else (255, 255, 255)
-        cv2.putText(canvas, f"SYSTEM: {action_state['message']}", (hud_x, hud_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(canvas, f"SYSTEM: {action_state['message']}", (hud_x, hud_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
         if mouse_score is not None:
             mouse_text = f"Mouse PAR Score: {mouse_score:.2f}"
@@ -537,7 +557,8 @@ class ReaderHelperApp:
             mouse_color = (100, 100, 100)
             
         cv2.putText(canvas, mouse_text, (hud_x, hud_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouse_color, 1)
-        cv2.putText(canvas, f"Fusion Struggle Level: {action_state['struggle_level']:.2f}", (hud_x, hud_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        cv2.putText(canvas, f"Active Paragraph Index: {action_state['active_para']}", (hud_x, hud_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 100), 1)
+        cv2.putText(canvas, f"Fusion Struggle Level: {action_state['struggle_level']:.2f}", (hud_x, hud_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
     def _handle_input(self):
         key = cv2.waitKey(1) & 0xFF
