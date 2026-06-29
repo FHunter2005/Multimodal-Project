@@ -3,20 +3,6 @@ PDF Gaze Reader
 ===============
 PDF reading  : PyMuPDF, paragraph detection, stuck detector, Gemini summary dialog
 Gaze tracking: imported from gaze_core.py (RetinaFace + ResNet50 eye crops)
-
-Run
----
-  $env:GEMINI_API_KEY = "your_key"
-  python pdf_gaze_resnet.py --pdf "your_paper.pdf"
-
-Controls
---------
-  SPACE   confirm calibration / drift dot
-  j / k   scroll down / up
-  n / p   next / prev page
-  d       drift correction
-  r       recalibrate
-  q       quit
 """
 
 import cv2, time, numpy as np, threading, os, sys, argparse
