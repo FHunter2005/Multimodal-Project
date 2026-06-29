@@ -1,10 +1,10 @@
 import time
 import math
-from collections import deque
+from collections import deque, Counter # <-- Added Counter
 from pynput import mouse
 
 class MouseReadingAnalyzer:
-    def __init__(self, short_window=4.0, long_window=10.0):
+    def __init__(self, short_window=4.0, long_window=10.0, state_buffer_size=30):
         self.short_window = short_window
         self.long_window = long_window
         self.history = deque()
@@ -12,6 +12,9 @@ class MouseReadingAnalyzer:
         self.is_active_reader = False
         self.smoothed_intensity = 0.0
         self._listener = None
+        
+        # NEW: A buffer to hold recent states for majority voting
+        self.state_buffer = deque(maxlen=state_buffer_size) 
 
     def start(self):
         self._listener = mouse.Listener(on_move=self._on_move)
@@ -26,7 +29,7 @@ class MouseReadingAnalyzer:
         self.history.append((time.time(), x, y))
 
     def _calc_kinematics(self, points):
-        """Calculates distance, directional distances, and reversals."""
+        # ... (Keep your existing _calc_kinematics exactly as it is) ...
         if len(points) < 2:
             return 0.0, 0.0, 0.0, 0
             
@@ -77,45 +80,42 @@ class MouseReadingAnalyzer:
         if not self.is_active_reader:
             return {"state": "Inactive", "intensity": 0.0, "score": None}
 
-        # Phase 2: State Prediction
-        state = "Undefined"
+        # Phase 2: State Prediction (Calculate raw state first)
+        raw_state = "Undefined"
         raw_intensity = 0.0
-        raw_score = 0.0 # Legacy struggle score
+        raw_score = 0.0 
         
         if len(short_history) >= 3:
             short_dist, x_dist, y_dist, short_flips = self._calc_kinematics(short_history)
             speed = short_dist / self.short_window
 
-            # Anomaly: Hovering/Stuck 
             if short_dist < 50:
-                # Mouse can't confidently tell deep focus vs stuck, so we abstain (Undefined)
-                state = "Undefined"
+                raw_state = "Undefined"
                 raw_intensity = 0.0
                 raw_score = 0.0 
-
-            # Anomaly: Chaotic Frustration / Distracted
             elif short_dist > 300 and short_flips > 8:
-                state = "Distracted"
+                raw_state = "Distracted"
                 raw_intensity = min(1.0, (short_flips - 8) / 12.0)
                 raw_score = raw_intensity
-
-            # Normal Behavior: Tracing text
             else:
                 if speed > 400 or y_dist > (x_dist * 1.5):
-                    # Moving fast or primarily vertically
-                    state = "Skimming"
+                    raw_state = "Skimming"
                     raw_intensity = min(1.0, speed / 800.0)
                 else:
-                    # Moderate, primarily horizontal movement
-                    state = "Reading (Focused)"
+                    raw_state = "Reading (Focused)"
                     raw_intensity = min(1.0, speed / 300.0)
 
-        # Phase 3: Temporal Smoothing
+        # NEW Phase 2.5: Discrete State Smoothing (Majority Vote)
+        self.state_buffer.append(raw_state)
+        # Find the most common state in the buffer (e.g., last 30 frames)
+        smoothed_state = Counter(self.state_buffer).most_common(1)[0][0]
+
+        # Phase 3: Temporal Smoothing (Intensity)
         alpha = 0.05 
         self.smoothed_intensity = (alpha * raw_intensity) + ((1.0 - alpha) * self.smoothed_intensity)
 
         return {
-            "state": state, 
+            "state": smoothed_state,  # <-- Return the smoothed state, not the raw one
             "intensity": self.smoothed_intensity, 
-            "score": raw_score if state == "Distracted" else 0.0
+            "score": raw_score if smoothed_state == "Distracted" else 0.0
         }

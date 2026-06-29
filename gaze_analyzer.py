@@ -85,46 +85,41 @@ class GazeReadingAnalyzer:
         """
         Applies spatial heuristics to classify what the user is actually doing.
         """
-        # Calculate ratio of time spent looking at the actual text
         on_paper_count = sum(1 for item in self.history if item[3] is True)
         on_paper_ratio = on_paper_count / len(self.history)
         
-        # Calculate vertical progress (Positive = moving down the page)
         first_y = self.history[0][2]
         last_y = self.history[-1][2]
         dy_total = last_y - first_y 
         
-        # Calculate spatial bounding box to detect erratic vs focused movement
         xs = [h[1] for h in self.history]
         ys = [h[2] for h in self.history]
         spread_x = max(xs) - min(xs)
         spread_y = max(ys) - min(ys)
         
-        # --- State Decision Tree ---
+        # NEW: Calculate where on the screen the user is primarily looking
+        avg_y = sum(ys) / len(ys) if ys else 0
         
-        # 1. Thinking / Zoning Out (Gaze is predominantly off the paper)
+        # --- State Decision Tree ---
         if on_paper_ratio < 0.50:
             return "Thinking (Off-Text)"
             
-        # 2. Struggling (Score is high, overriding normal reading mechanics)
         if struggle_score > 0.60:
             return "Struggling / Stuck"
             
-        # 3. Distracted (Massive, erratic jumps across the screen)
         if spread_y > 400 and spread_x > 800:
             return "Distracted"
             
-        # 4. Skimming (Fast downward movement, few heavy fixations)
         if dy_total > 150 and fixations <= 1 and spread_x < 600:
             return "Skimming"
             
-        # 5. Scanning / Searching (Moving fast *upwards* to re-read earlier context)
         if dy_total < -100:
             return "Scanning (Upwards)"
             
-        # 6. Deep Focus (Staring at a very tight area, e.g., a diagram, without struggling)
         if spread_x < 100 and spread_y < 100:
+            # NEW: If looking at the bottom, downgrade to regular reading
+            if avg_y > 750: 
+                return "Reading (Focus  ed)"
             return "Deep Focus"
             
-        # 7. Default behavior
         return "Reading (Focused)"

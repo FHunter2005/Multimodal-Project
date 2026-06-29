@@ -219,13 +219,13 @@ class LocalEpistemicTracker:
     fps           : int   Expected FPS (used for time labels only)
     """
 
-    STATES = ["Concentration", "Confusion", "Boredom", "Frustration"]
+    STATES = ["concentration", "confusion", "boredom", "frustration"]
 
     _COLORS = {
-        "Concentration": (200, 175,  50),
-        "Confusion":     ( 50, 170, 255),
-        "Boredom":       (120, 115, 195),
-        "Frustration":   ( 40,  50, 215),
+        "concentration": (200, 175,  50),
+        "confusion":     ( 50, 170, 255),
+        "boredom":       (120, 115, 195),
+        "frustration":   ( 40,  50, 215),
     }
 
     def __init__(
@@ -234,17 +234,24 @@ class LocalEpistemicTracker:
         smooth_alpha:  float = 0.10,
         min_frames:    int   = 20,
         fps:           int   = 30,
+        escalation_t_sec: float = 3.0,     # NEW: T seconds before escalation begins
+        escalation_rate:  float = 0.15,    # NEW: Score boost per second after T
+        escalation_thresh: float = 0.35
     ):
         self.window_frames = window_frames
         self.smooth_alpha  = smooth_alpha
         self.min_frames    = min_frames
         self.fps           = fps
-
+        self.escalation_t_sec = escalation_t_sec
+        self.escalation_rate = escalation_rate
+        self.escalation_thresh = escalation_thresh
+        self.active_frames = {s: 0 for s in self.STATES}
         self._buf: deque = deque(maxlen=window_frames)   # np.ndarray or None
         self._has_pose   = False                         # set on first pose frame
 
         self.target_scores = {s: 0.0 for s in self.STATES}
         self.smooth_scores = {s: 0.0 for s in self.STATES}
+        self.current_state = {s: 0.0 for s in self.STATES}
 
         # Sub-signal scores for the debug panel (Confusion + Frustration)
         self.sub_conf = {}   # name → float
@@ -302,7 +309,7 @@ class LocalEpistemicTracker:
             self.dominant_conf  = 0.0
             return
 
-        arr = np.stack(valid, axis=0)   # (n, n_features)
+        arr = np.stack(valid, axis=0)
         st  = _Stats(arr)
 
         conf  = self._score_confusion(st, n)
@@ -311,20 +318,47 @@ class LocalEpistemicTracker:
         conc  = self._score_concentration(st, n)
 
         # ── Cross-suppression ──────────────────────────────────────────────
-        # Frustration and boredom are physiologically incompatible at high levels
         frus = _clip01(frus - 0.35 * bore)
         bore = _clip01(bore - 0.45 * frus)
-        # Confusion suppresses concentration
         conc = _clip01(conc - 0.40 * conf)
-        # Frustration suppresses concentration
         conc = _clip01(conc - 0.30 * frus)
-        # Boredom suppresses confusion slightly
         conf = _clip01(conf - 0.15 * bore)
 
-        self.target_scores["Confusion"]     = conf
-        self.target_scores["Frustration"]   = frus
-        self.target_scores["Boredom"]       = bore
-        self.target_scores["Concentration"] = conc
+        # ── NEW: Temporal Escalation Logic ─────────────────────────────────
+        base_scores = {
+            "confusion": conf,
+            "frustration": frus,
+            "boredom": bore,
+            "concentration": conc
+        }
+
+        # Define which states should actively escalate over time
+        escalating_states = ["confusion", "frustration"]
+
+        for s in self.STATES:
+            # Check if the state is currently active enough to start the timer
+            if base_scores[s] >= self.escalation_thresh:
+                self.active_frames[s] += 1
+            else:
+                # Fast decay if the user drops the expression (e.g., -2 frames per tick)
+                self.active_frames[s] = max(0, self.active_frames[s] - 2)
+
+            # Apply the boost if we have crossed the T threshold
+            if s in escalating_states:
+                frames_past_t = self.active_frames[s] - (self.escalation_t_sec * self.fps)
+                if frames_past_t > 0:
+                    # Calculate linear boost (e.g., +0.15 for every second past T)
+                    bonus = (frames_past_t / self.fps) * self.escalation_rate
+                    base_scores[s] = _clip01(base_scores[s] + bonus)
+
+        # Map back to target scores
+        self.target_scores["confusion"]     = base_scores["confusion"]
+        self.target_scores["frustration"]   = base_scores["frustration"]
+        self.target_scores["boredom"]       = base_scores["boredom"]
+        self.target_scores["concentration"] = base_scores["concentration"]
+        # ───────────────────────────────────────────────────────────────────
+
+        self.current_state = dict(self.target_scores)
 
         best = max(self.STATES, key=lambda s: self.target_scores[s])
         self.dominant_state = best
@@ -336,7 +370,6 @@ class LocalEpistemicTracker:
             k for k, v in self.sub_conf.items() if v >= THRESH]
         self._active_frus_signals = [
             k for k, v in self.sub_frus.items() if v >= THRESH]
-
     # ── CONFUSION ─────────────────────────────────────────────────────────────
 
     def _score_confusion(self, st: _Stats, n: int) -> float:
@@ -623,10 +656,10 @@ class LocalEpistemicTracker:
 
         self._sub_panel(img, "CONFUSION SIGNALS", self.sub_conf,
                         2, panel_y, mid - 4, panel_h,
-                        self._COLORS["Confusion"])
+                        self._COLORS["confusion"])
         self._sub_panel(img, "FRUSTRATION SIGNALS", self.sub_frus,
                         mid + 2, panel_y, W - mid - 4, panel_h,
-                        self._COLORS["Frustration"])
+                        self._COLORS["frustration"])
 
     def _sub_panel(self, img, title, subs, x, y, w, h, col):
         if not subs or h < 20:
@@ -651,10 +684,10 @@ class LocalEpistemicTracker:
     @staticmethod
     def _hint(state: str) -> str:
         return {
-            "Concentration": "mild furrow · still · eyes open",
-            "Confusion":     "inner brow · tilt · lean-in",
-            "Boredom":       "eyes down · heavy lids · slack jaw · head drop", # UPDATED
-            "Frustration":   "hard furrow · lip press · agitation",
+            "concentration": "mild furrow · still · eyes open",
+            "confusion":     "inner brow · tilt · lean-in",
+            "boredom":       "eyes down · heavy lids · slack jaw · head drop", # UPDATED
+            "frustration":   "hard furrow · lip press · agitation",
         }.get(state, "")
 
     @staticmethod
