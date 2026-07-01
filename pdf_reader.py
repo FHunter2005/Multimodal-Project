@@ -116,7 +116,7 @@ class PDFDocument:
                 # If a new paragraph is detected, finalize the previous one and reset
                 if is_new_para and current_para:
                     para_text = " ".join(current_para).strip()
-                    if len(para_text) >= 80 and cy0 >= ph * 0.12:
+                    if len(para_text) >= 20 and cy0 >= ph * 0.05:
                         paras.append({
                             "bbox": (int(cx0 * self.zoom), int(cy0 * self.zoom), 
                                      int(cx1 * self.zoom), int(cy1 * self.zoom)),
@@ -134,7 +134,7 @@ class PDFDocument:
             # Save the final accumulated paragraph from the block
             if current_para:
                 para_text = " ".join(current_para).strip()
-                if len(para_text) >= 80 and cy0 >= ph * 0.12:
+                if len(para_text) >= 20 and cy0 >= ph * 0.05:
                     paras.append({
                         "bbox": (int(cx0 * self.zoom), int(cy0 * self.zoom), 
                                  int(cx1 * self.zoom), int(cy1 * self.zoom)),

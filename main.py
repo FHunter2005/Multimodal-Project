@@ -30,6 +30,7 @@ from ui_components import (SCREEN_W, SCREEN_H, SANDBOX_W, SANDBOX_H, WHEEL_W, WH
 from pdf_reader import PDFDocument, summarize, draw_dialog
 from dialog_controller import DialogController
 from face_modality import FaceModalityTracker
+from voice_assistant import VoiceAssistant
 
 
 class ReaderHelperApp:
@@ -40,18 +41,28 @@ class ReaderHelperApp:
         
         # Initialize PDF Document
         self.pdf = PDFDocument(pdf_path, zoom)
-        self.page = 0
+        self.page = 0 
         self.scroll_y = 0
         self.max_scroll = 0
         self.hov_buf = deque(maxlen=20)
         self.stable_hov = None
+        self.current_hover_idx = None
+        self.hover_switch_time = 0.0
         self.recent_face_widths = deque(maxlen=10)
         self.recent_eye_openness = deque(maxlen=10)
         self.dlg_active = False
         self.dlg_para = None
         self.dlg_summary = {'text': None}
         self.focus_tunnel_active = False
+        self.focus_strength = 0.0
         self.current_gaze_data = None
+        self.gaze_history = deque(maxlen=10)
+        self.off_screen_frames = 0
+        self.gaze_wandering_frames = 0
+        self.head_turned_away = False
+        self.face_looking_at_screen = True
+        self.face_direction_baseline = None
+        self.face_direction_samples = deque(maxlen=30)
         # Initialize Core Trackers
         self.gaze_reader = GazeReader(screen_w=SCREEN_W, screen_h=SCREEN_H, cam_src=0).start()
         self.face_tracker = FaceModalityTracker(blink_threshold=BLINK_BLENDSHAPE_THRESHOLD)
@@ -61,9 +72,9 @@ class ReaderHelperApp:
         self.epistemic_tracker = LocalEpistemicTracker(window_frames=90, min_frames=20)
         self.mouse_tracker = MouseReadingAnalyzer()
         self.gaze_tracker = GazeReadingAnalyzer(window_size=5.0)
-        self.mouse_score = None # <--- ADD THIS LINE
+        self.mouse_score = None
         # FUSED Dialog Controller
-        self.dialog_controller = DialogController(dwell=dwell)
+        self.dialog_controller = DialogController(dwell=dwell, voice_assistant=VoiceAssistant(enabled=True))
         self.max_score = None
         # State tracking
         self.inference_mode = True
@@ -99,6 +110,106 @@ class ReaderHelperApp:
             
         self.cleanup()
 
+    def _estimate_head_turn(self, lm):
+        if lm is None:
+            return False
+
+        left_eye = np.array([(lm[159].x + lm[145].x) / 2.0, (lm[159].y + lm[145].y) / 2.0], dtype=np.float32)
+        right_eye = np.array([(lm[386].x + lm[374].x) / 2.0, (lm[386].y + lm[374].y) / 2.0], dtype=np.float32)
+        nose = np.array([lm[1].x, lm[1].y], dtype=np.float32)
+        eye_mid = (left_eye + right_eye) / 2.0
+        horizontal_offset = abs(nose[0] - eye_mid[0])
+        vertical_offset = abs(nose[1] - eye_mid[1])
+        return horizontal_offset > 0.08 and (abs(nose[0] - 0.5) > 0.05 or vertical_offset > 0.10)
+
+    def _update_face_direction_baseline(self, lm):
+        if lm is None:
+            return
+
+        nose = np.array([lm[1].x, lm[1].y], dtype=np.float32)
+        self.face_direction_samples.append(nose)
+        if len(self.face_direction_samples) < 20:
+            return
+
+        baseline = np.mean(list(self.face_direction_samples), axis=0)
+        if self.face_direction_baseline is None:
+            self.face_direction_baseline = baseline
+            return
+
+        self.face_direction_baseline = 0.8 * self.face_direction_baseline + 0.2 * baseline
+
+    def _is_face_looking_at_screen(self, lm):
+        if lm is None:
+            return True
+
+        self._update_face_direction_baseline(lm)
+        if self.face_direction_baseline is None:
+            return True
+
+        nose = np.array([lm[1].x, lm[1].y], dtype=np.float32)
+        dx = nose[0] - self.face_direction_baseline[0]
+        dy = nose[1] - self.face_direction_baseline[1]
+        angle_threshold = 0.12
+        return abs(dx) <= angle_threshold and abs(dy) <= angle_threshold
+
+    def _estimate_gaze_context(self):
+        off_screen = (
+            self.gaze_x < -80 or self.gaze_x > self.SCREEN_W + 80 or
+            self.gaze_y < -80 or self.gaze_y > self.SCREEN_H + 80
+        )
+
+        self.gaze_history.append((self.gaze_x, self.gaze_y))
+        gaze_wandering = False
+        if len(self.gaze_history) >= 3:
+            points = list(self.gaze_history)
+            total_motion = 0.0
+            direction_changes = 0
+            prev_dx = prev_dy = None
+            for (x1, y1), (x2, y2) in zip(points[:-1], points[1:]):
+                dx = x2 - x1
+                dy = y2 - y1
+                total_motion += np.sqrt(dx * dx + dy * dy)
+                if prev_dx is not None:
+                    if (dx > 0) != (prev_dx > 0) or (dy > 0) != (prev_dy > 0):
+                        direction_changes += 1
+                prev_dx, prev_dy = dx, dy
+            gaze_wandering = (total_motion > 220) and (direction_changes >= 2)
+
+        if off_screen:
+            self.off_screen_frames += 1
+        else:
+            self.off_screen_frames = max(0, self.off_screen_frames - 1)
+
+        if gaze_wandering:
+            self.gaze_wandering_frames += 1
+        else:
+            self.gaze_wandering_frames = max(0, self.gaze_wandering_frames - 1)
+
+        return {
+            "gaze_off_screen": self.off_screen_frames >= 4,
+            "gaze_wandering": self.gaze_wandering_frames >= 4,
+        }
+
+    def _estimate_mouse_wandering(self):
+        mouse_history = list(getattr(self.mouse_tracker, 'history', []))
+        if len(mouse_history) < 4:
+            return False
+
+        points = [(x, y) for _, x, y in mouse_history[-8:]]
+        total_motion = 0.0
+        direction_changes = 0
+        prev_dx = prev_dy = None
+        for (x1, y1), (x2, y2) in zip(points[:-1], points[1:]):
+            dx = x2 - x1
+            dy = y2 - y1
+            total_motion += np.sqrt(dx * dx + dy * dy)
+            if prev_dx is not None:
+                if (dx > 0) != (prev_dx > 0) or (dy > 0) != (prev_dy > 0):
+                    direction_changes += 1
+            prev_dx, prev_dy = dx, dy
+
+        return total_motion > 600 and direction_changes >= 4
+
     def _process_camera_feed(self):
         self.gaze_reader.update()
         raw_frame = self.gaze_reader._stream.read()
@@ -133,52 +244,100 @@ class ReaderHelperApp:
             self.dialog_controller.help_active = True
 
         # 3. Process RAW Gaze Data
+        self.stable_hov = None
         if self.gaze_reader.is_calibrated:
             raw_norm_x, raw_norm_y = self.gaze_reader.get_gaze_norm()
             self.gaze_x = int(raw_norm_x * self.SCREEN_W)
             self.gaze_y = int(raw_norm_y * self.SCREEN_H)
-            
+
             self.heatmap.update(self.gaze_x, self.gaze_y)
-            self.current_gaze_data = self.gaze_tracker.process_point(self.gaze_x, self.gaze_y)
-            self.current_gaze_score =  self.current_gaze_data['score']
-            self.current_gaze_state = self.current_gaze_data['state'] 
-        # 4. Collision detection (Hover state)
-        self.stable_hov = None
-        if self.inference_mode and self.gaze_reader.is_calibrated:
+
             pg_img, paras = self.pdf.get_page(self.page)
             ph, pw = pg_img.shape[:2]
             ox = max(0, (self.SCREEN_W - pw) // 2)
             gpx = self.gaze_x - ox
             gpy = self.gaze_y + self.scroll_y
-            hov = None
-            
-            if not self.dlg_active and paras and pw > 0:
-                ax0 = min(p["bbox"][0] for p in paras)
-                ax1 = max(p["bbox"][2] for p in paras)
-                hm  = (ax1 - ax0) * 0.35
-                if ax0 - hm <= gpx <= ax1 + hm:
-                    bd, bi = float('inf'), None
+            on_paper = (0 <= gpx <= pw) and (0 <= gpy <= ph)
+
+            self.current_gaze_data = self.gaze_tracker.process_point(self.gaze_x, self.gaze_y, on_paper)
+            self.current_gaze_data.update({
+                "x": self.gaze_x,
+                "y": self.gaze_y,
+            })
+            self.current_gaze_score =  self.current_gaze_data['score']
+            self.current_gaze_state = self.current_gaze_data['state'] 
+
+            # 4. Collision detection (Hover state)
+            if self.inference_mode:
+                gaze_context = self._estimate_gaze_context()
+                invalid_for_paragraph = (
+                    not self.dlg_active and paras and pw > 0 and (
+                        not on_paper or self.head_turned_away or gaze_context.get('gaze_off_screen', False) or gaze_context.get('gaze_wandering', False)
+                    )
+                )
+
+                if invalid_for_paragraph:
+                    self.stable_hov = None
+                    self.hover_switch_time = time.time()
+                    if self.dialog_controller.cur_para is not None:
+                        self.dialog_controller.reset_dwell()
+                elif not self.dlg_active and paras and pw > 0:
+                    best_idx = None
+                    best_dist = float('inf')
                     for pi, para in enumerate(paras):
                         bx0, by0, bx1, by1 = para["bbox"]
-                        vd = 0 if by0 <= by1 else min(abs(gpy - by0), abs(gpy - by1))
-                        if vd < 60 and vd < bd: bd = vd; bi = pi
-                    hov = bi
+                        x_margin = max(80, (bx1 - bx0) * 0.2)
+                        y_center = (by0 + by1) / 2.0
+                        if bx0 - x_margin <= gpx <= bx1 + x_margin:
+                            vd = abs(gpy - y_center)
+                            if vd < best_dist:
+                                best_dist = vd
+                                best_idx = pi
 
-            self.hov_buf.append(hov)
-            counts = {}
-            for v in self.hov_buf:
-                if v is not None: counts[v] = counts.get(v, 0) + 1
-            nones = self.hov_buf.count(None)
-            self.stable_hov = (max(counts, key=counts.get) if counts and nones < len(self.hov_buf) // 2 else None)
+                    current_hover = best_idx if best_idx is not None and best_dist < 140 else None
+                    now = time.time()
+                    if current_hover is None:
+                        self.stable_hov = None
+                        self.hover_switch_time = now
+                    elif self.stable_hov is None:
+                        self.stable_hov = current_hover
+                        self.hover_switch_time = now
+                    elif current_hover != self.stable_hov and (now - self.hover_switch_time) > 0.15:
+                        self.stable_hov = current_hover
+                        self.hover_switch_time = now
 
         if self.gaze_reader.is_calibrated:
+            self.head_turned_away = self._estimate_head_turn(lm)
+            self.face_looking_at_screen = self._is_face_looking_at_screen(lm)
+            gaze_context = self._estimate_gaze_context()
+            mouse_wandering = self._estimate_mouse_wandering()
+
             # 5. DIALOG CONTROLLER (Fused State Evaluation)
+            physical_cues = {
+                'leaning_in': getattr(self, 'is_leaning_in', False),
+                'squinting': getattr(self, 'is_squinting', False),
+                'head_turned_away': self.head_turned_away,
+                'face_looking_at_screen': self.face_looking_at_screen,
+                'gaze_off_screen': gaze_context.get('gaze_off_screen', False),
+                'gaze_wandering': gaze_context.get('gaze_wandering', False),
+                'mouse_wandering': mouse_wandering,
+            }
             self.system_action = self.dialog_controller.evaluate(
-                self.mouse_score, self.current_gaze_data, epistemic_state, emotion_state, self.stable_hov
+                self.mouse_score, self.current_gaze_data, epistemic_state, emotion_state, self.stable_hov, physical_cues
             )
 
         # 6. HEAD PROXIMITY & FOCUS TUNNEL LOGIC
         self.focus_tunnel_active = False
+        self.focus_qstrength = 0.0
+
+        if self.system_action:
+            fused_state = self.system_action.get('fused_state', '')
+            fused_intensity = float(self.system_action.get('fused_intensity', 0.0) or 0.0)
+
+            if fused_state == 'Deep Focus' and fused_intensity >= 0.35:
+                self.focus_tunnel_active = True
+                self.focus_strength = np.clip((fused_intensity - 0.35) / 0.45, 0.0, 1.0)
+
         if lm is not None:
             # Measure raw physical metrics for THIS frame
             dx = lm[454].x - lm[234].x
@@ -212,14 +371,6 @@ class ReaderHelperApp:
             # Evaluate Physical Tells against the Baseline
             self.is_leaning_in = current_face_width > (self.baseline_face_width * 1.15)
             self.is_squinting = current_eye_openness < (self.baseline_eye_openness * 0.85)
-            
-            # Evaluate Cognitive States
-            self.is_confused = self.system_action.get('face_score', 0.0) > 0.6 if self.system_action else False
-            self.is_focused = self.current_gaze_score > 0.85 
-            
-            # Trigger Tunnel
-            if (self.is_leaning_in or self.is_squinting) and (self.is_confused or self.is_focused):
-                self.focus_tunnel_active = True
 
         # 7. Generate PDF Summaries if needed
         # Safely check system_action (it might be None during calibration)
@@ -273,39 +424,39 @@ class ReaderHelperApp:
 
             # --- NEW: APPLY FOCUS TUNNEL EFFECT ---
             if getattr(self, 'focus_tunnel_active', False):
-                # 1. Subtle Digital Zoom (1.15x) centered on Gaze
-                zoom = 1.15
+                strength = getattr(self, 'focus_strength', 0.0)
                 h, w = self.SCREEN_H, self.SCREEN_W
-                
-                # Calculate crop boundaries based on gaze
-                x_center = np.clip(self.gaze_x, w // (2 * zoom), w - w // (2 * zoom))
-                y_center = np.clip(self.gaze_y, h // (2 * zoom), h - h // (2 * zoom))
-                
-                x1, x2 = int(x_center - w / (2 * zoom)), int(x_center + w / (2 * zoom))
-                y1, y2 = int(y_center - h / (2 * zoom)), int(y_center + h / (2 * zoom))
-                
-                # Crop and scale back up
-                zoomed_canvas = cv2.resize(canvas[y1:y2, x1:x2], (w, h), interpolation=cv2.INTER_LINEAR)
-                canvas[:] = zoomed_canvas
 
-                # 2. Horizontal Dimming (Vignette on the sides)
-                # Create a 1D gradient mapped to the X axis
-                x_idx = np.arange(w)
-                
-                # Calculate distance from the gaze X coordinate, normalized
-                # w/2.5 dictates how wide the "clear" tunnel is
-                dist_x = np.abs(x_idx - self.gaze_x) / (w / 2.5) 
-                
-                # Curve the falloff (squared) so the center is very clear, fading aggressively at edges
-                mask_1d = np.clip(dist_x, 0, 1) ** 2 
-                mask_1d *= 0.85 # Max dimming opacity (85% black)
-                
-                # Broadcast the 1D mask across the whole image
-                mask_2d = np.tile(mask_1d, (h, 1))
-                
-                # Apply the dimming
+                # Create a copy of the current canvas to preserve the base image.
+                base_canvas = canvas.copy()
+
+                # 1. Simulate a local text-size increase by slightly scaling the central region.
+                #    This keeps the PDF readable but makes the content near the gaze point feel more prominent.
+                focus_radius = int(180 + 80 * strength)
+                scale = 1.00 + 0.04 * strength
+                x1 = max(0, int(self.gaze_x - focus_radius))
+                x2 = min(w, int(self.gaze_x + focus_radius))
+                y1 = max(0, int(self.gaze_y - focus_radius))
+                y2 = min(h, int(self.gaze_y + focus_radius))
+
+                if x2 > x1 and y2 > y1:
+                    crop = base_canvas[y1:y2, x1:x2]
+                    resized = cv2.resize(crop, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+                    canvas[y1:y2, x1:x2] = resized
+
+                # 2. Static side-only dimming: stronger on the left/right edges, softer and smoother.
+                side_w = int(120 + 40 * strength)
+                mask = np.ones((h, w), dtype=np.float32)
+
+                x = np.linspace(0, 1, w, dtype=np.float32)
+                left_mask = np.clip(x / max(0.2, side_w / w), 0.0, 1.0)
+                right_mask = np.clip((1.0 - x) / max(0.2, side_w / w), 0.0, 1.0)
+                edge_mask = np.maximum(left_mask, right_mask)
+                edge_mask = np.clip(0.55 + 0.35 * edge_mask, 0.55, 0.9)
+                mask *= edge_mask[None, :]
+
                 for c in range(3):
-                    canvas[:, :, c] = canvas[:, :, c] * (1.0 - mask_2d)
+                    canvas[:, :, c] = canvas[:, :, c] * mask
 
             # Draw highlight for stable hovered paragraph
             for pi, para in enumerate(paras):
@@ -329,25 +480,33 @@ class ReaderHelperApp:
             cv2.putText(canvas, "DEBUG: TUNNEL STATE", (dx + 15, dy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 100), 2)
             cv2.line(canvas, (dx, dy + 40), (dx + debug_w, dy + 40), (0, 255, 100), 1)
             
-            # Safely get variables (they might not exist on the very first frame)
-            fw = getattr(self, 'debug_face_width', 0.0)
-            bfw = getattr(self, 'baseline_face_width', 0.0)
-            eo = getattr(self, 'debug_eye_openness', 0.0)
-            beo = getattr(self, 'baseline_eye_openness', 0.0)
-            
-            # Format the data lines
+            # Tunnel-specific debug values only
+            tunnel_active = getattr(self, 'focus_tunnel_active', False)
+            tunnel_strength = getattr(self, 'focus_strength', 0.0)
+            fused_state = self.system_action.get('fused_state', '') if self.system_action else ''
+            fused_intensity = self.system_action.get('fused_intensity', 0.0) if self.system_action else 0.0
+
             lines = [
-                f"Tunnel Active: {getattr(self, 'focus_tunnel_active', False)}",
-                f"Leaning In: {getattr(self, 'is_leaning_in', False)}",
-                f"Squinting:  {getattr(self, 'is_squinting', False)}",
-                f"Confused (>0.6): {getattr(self, 'is_confused', False)}",
-                f"Focused (>0.85): {getattr(self, 'is_focused', False)}",
-                "--- Raw Data ---",
-                f"Face Width: {fw:.1f} (Base: {bfw:.1f})",
-                f"Eye Openness: {eo:.4f} (Base: {beo:.4f})",
-                f"Face Score: {self.system_action.get('face_score', 0.0) if self.system_action else 0.0:.2f}",
+                f"Tunnel Active: {tunnel_active}",
+                f"Strength: {tunnel_strength:.2f}",
+                f"Fused State: {fused_state}",
+                f"Fused Intensity: {fused_intensity:.2f}",
             ]
-            print(f"----------------------------- {self.system_action.get('face_score', 0.0) if self.system_action else 0.0:.2f}")
+
+            # Top-right state intensity panel
+            if self.system_action:
+                state_intensities = self.dialog_controller.smoothed_intensities
+                panel_x = self.SCREEN_W - 360
+                panel_y = 20
+                panel_w = 330
+                panel_h = 170
+                cv2.rectangle(canvas, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (20, 20, 25), -1)
+                cv2.rectangle(canvas, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 255, 100), 1)
+                cv2.putText(canvas, "STATE INTENSITIES", (panel_x + 12, panel_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
+                for i, (state, val) in enumerate(state_intensities.items()):
+                    y = panel_y + 46 + i * 18
+                    if y < panel_y + panel_h - 12:
+                        cv2.putText(canvas, f"{state}: {val:.2f}", (panel_x + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
             # Draw text with color coding for booleans
             for i, line in enumerate(lines):
                 color = (200, 200, 200) # Default gray

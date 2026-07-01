@@ -1,7 +1,8 @@
 import time
 
+
 class DialogController:
-    def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=30.0, tip_cooldown=30.0):
+    def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=10.0, tip_cooldown=30.0, voice_assistant=None):
         self.struggle_frames = 0
         self.help_active = False
         self.system_message = "Listening to User State..."
@@ -20,6 +21,16 @@ class DialogController:
         
         self.tip_cooldown = tip_cooldown
         self.last_tip_time = 0.0
+        self.voice_assistant = voice_assistant
+
+        self.off_text_frames = 0
+        self.distracted_frames = 0
+        self.last_voice_prompt_time = 0.0
+        self.voice_prompt_cooldown = 25.0
+        self.distraction_confidence = 0.0
+        self.same_block_fixation_frames = 0
+        self.last_fixation_block = None
+        self.last_gaze_xy = None
         
         # Data buffers to establish baseline (Mouse only now)
         self.calib_mouse_intensities = []
@@ -63,7 +74,7 @@ class DialogController:
                 self.user_profile["is_mouse_reader"] = True
                 print("[SYSTEM] User behavior shifted: Mouse Tracking ACTIVATED.")
 
-    def evaluate(self, mouse_data, gaze_data, epistemic_state, emotion_scores, current_para):
+    def evaluate(self, mouse_data, gaze_data, epistemic_state, emotion_scores, current_para, physical_cues=None):
         now = time.time()
         
         if self.start_time is None:
@@ -77,6 +88,7 @@ class DialogController:
         
         gaze_state = gaze_data.get("state", "Initializing")
         gaze_struggle_score = gaze_data.get("score", 0.0)
+        gaze_x = gaze_data.get("x")
         gaze_y = gaze_data.get("y", 540)
 
         confusion = epistemic_state.get('confusion', 0.0) if isinstance(epistemic_state, dict) else 0.0
@@ -85,6 +97,14 @@ class DialogController:
         
         plutchik_frustration = (anger * 0.70) + (sadness * 0.30)
         face_struggle = max(confusion, plutchik_frustration)
+        physical_cues = physical_cues or {}
+        leaning_in = bool(physical_cues.get('leaning_in', False))
+        squinting = bool(physical_cues.get('squinting', False))
+        head_turned_away = bool(physical_cues.get('head_turned_away', False))
+        face_looking_at_screen = bool(physical_cues.get('face_looking_at_screen', True))
+        gaze_off_screen = bool(physical_cues.get('gaze_off_screen', False))
+        gaze_wandering = bool(physical_cues.get('gaze_wandering', False))
+        mouse_wandering = bool(physical_cues.get('mouse_wandering', False))
 
         # ---------------------------------------------------------
         # 2. CALIBRATION PHASE (Observation Only)
@@ -121,17 +141,82 @@ class DialogController:
             "Deep Focus": []
         }
 
-        # Directly use raw face_struggle score instead of adjusted baselines
-        if face_struggle > 0.25:
-            evidence_pool["Struggling / Stuck"].append(min(1.0, face_struggle))
+        # Struggle cues still matter, but less than before so concentration can dominate.
+        struggle_strength = min(1.0, face_struggle * 0.45)
+        if confusion > 0.25:
+            struggle_strength = max(struggle_strength, min(1.0, confusion * 0.85))
+        if struggle_strength > 0.25:
+            evidence_pool["Struggling / Stuck"].append(struggle_strength)
+
+        sustained_same_block = False
+        same_block_stuck_score = 0.0
+        if current_para is not None and face_looking_at_screen and not head_turned_away and not gaze_off_screen and not gaze_wandering:
+            if self.last_fixation_block is not None and current_para == self.last_fixation_block:
+                sustained_same_block = True
+                if gaze_x is not None and self.last_gaze_xy is not None:
+                    last_x, last_y = self.last_gaze_xy
+                    dx = gaze_x - last_x
+                    dy = gaze_y - last_y
+                    if abs(dx) <= 90 and abs(dy) <= 70:
+                        self.same_block_fixation_frames += 1.0
+                        if self.same_block_fixation_frames > 25:
+                            self.same_block_fixation_frames += 0.35
+                    else:
+                        self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 1.0)
+                else:
+                    self.same_block_fixation_frames += 0.8
+            else:
+                self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 4.0)
+
+            self.same_block_fixation_frames = min(400.0, self.same_block_fixation_frames)
+            same_block_stuck_score = min(1.0, 0.02 + (self.same_block_fixation_frames / 120.0))
+        else:
+            self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 1.5)
+
+        if sustained_same_block and current_para is not None:
+            evidence_pool["Struggling / Stuck"].append(min(1.0, same_block_stuck_score * 1.35))
+            evidence_pool["Reading (Focused)"].append(0.04)
+            evidence_pool["Deep Focus"].append(0.02)
+
+        # Physical cues that suggest concentrated reading.
+        if leaning_in or squinting:
+            deep_focus_boost = 0.0
+            if leaning_in:
+                deep_focus_boost += 0.30
+            if squinting:
+                deep_focus_boost += 0.25
+            evidence_pool["Deep Focus"].append(min(1.0, 0.55 + deep_focus_boost))
+
+        if not face_looking_at_screen:
+            evidence_pool["Reading (Focused)"].append(0.02)
+            evidence_pool["Deep Focus"].append(0.01)
+            evidence_pool["Skimming"].append(0.05)
+        elif head_turned_away:
+            evidence_pool["Reading (Focused)"].append(0.10)
+            evidence_pool["Deep Focus"].append(0.05)
+            evidence_pool["Skimming"].append(0.10)
 
         if self.user_profile["is_mouse_reader"]:
             if mouse_state in evidence_pool and mouse_state not in ["Inactive", "Undefined"]:
                 evidence_pool[mouse_state].append(mouse_intensity)
 
-        if gaze_state in evidence_pool:
+        if head_turned_away and gaze_off_screen:
+            evidence_pool["Thinking (Off-Text)"].append(0.95 if not gaze_wandering else 0.70)
+        if gaze_off_screen and not gaze_wandering:
+            evidence_pool["Thinking (Off-Text)"].append(0.65)
+        if gaze_wandering:
+            evidence_pool["Distracted"].append(0.85)
+        if mouse_wandering:
+            evidence_pool["Distracted"].append(0.75)
+        if head_turned_away:
+            evidence_pool["Distracted"].append(0.25)
+
+        if not face_looking_at_screen and head_turned_away:
+            evidence_pool["Thinking (Off-Text)"].append(0.95)
+            evidence_pool["Distracted"].append(0.70)
+        elif gaze_state in evidence_pool:
             if gaze_state == "Struggling / Stuck":
-                evidence_pool[gaze_state].append(gaze_struggle_score)
+                evidence_pool[gaze_state].append(min(0.35, gaze_struggle_score * 0.35))
             elif gaze_state == "Reading (Focused)":
                 bottom_penalty = min(0.3, (gaze_y - 750) / 1000.0) if gaze_y > 750 else 0.0
                 intensity = max(0.1, (1.0 - gaze_struggle_score) - bottom_penalty)
@@ -166,17 +251,56 @@ class DialogController:
         if new_fused_state == "Deep Focus" and face_struggle < 0.5:
             pass # Keep it as Deep Focus
 
+        if not face_looking_at_screen and (gaze_off_screen or current_para is None):
+            new_fused_state = "Thinking (Off-Text)"
+            new_fused_intensity = max(new_fused_intensity, 0.90)
+        elif head_turned_away and (gaze_off_screen or current_para is None):
+            new_fused_state = "Thinking (Off-Text)"
+            new_fused_intensity = max(new_fused_intensity, 0.80)
+        elif (gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None):
+            new_fused_state = "Distracted"
+            new_fused_intensity = max(new_fused_intensity, 0.75)
+
         self.current_fused_state = new_fused_state
         fused_state = new_fused_state
         fused_intensity = new_fused_intensity
 
+        self.last_fixation_block = current_para
+        self.last_gaze_xy = (gaze_x, gaze_y) if gaze_x is not None else self.last_gaze_xy
+
         # ---------------------------------------------------------
         # 5. TEMPORAL THRESHOLDING
         # ---------------------------------------------------------
-        if fused_state == "Struggling / Stuck" and fused_intensity > 0.40:
+        if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
+            self.struggle_frames = max(0, self.struggle_frames - 10)
+        elif fused_state == "Struggling / Stuck" and fused_intensity > 0.40:
             self.struggle_frames += 1
         else:
             self.struggle_frames = max(0, self.struggle_frames - 2)
+
+        distraction_evidence = 0.0
+        if fused_state in {"Thinking (Off-Text)", "Distracted"}:
+            distraction_evidence += 0.55
+        if gaze_state in {"Thinking (Off-Text)", "Distracted"}:
+            distraction_evidence += 0.20
+        if current_para is None:
+            distraction_evidence += 0.15
+        if mouse_state in {"Inactive", "Undefined"} and mouse_intensity < 0.1:
+            distraction_evidence += 0.15
+        if face_struggle < 0.25 and confusion < 0.25:
+            distraction_evidence += 0.10
+
+        self.distraction_confidence = min(1.0, max(0.0, 0.7 * self.distraction_confidence + 0.3 * distraction_evidence))
+
+        if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or (head_turned_away and gaze_off_screen and not gaze_wandering):
+            self.off_text_frames += 1
+        else:
+            self.off_text_frames = max(0, self.off_text_frames - 1)
+
+        if (gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None):
+            self.distracted_frames += 1
+        else:
+            self.distracted_frames = max(0, self.distracted_frames - 1)
 
         TRIGGER_THRESHOLD = 300 
         triggered_para = None
@@ -233,6 +357,15 @@ class DialogController:
             self.help_active = False
             self.system_message = f"User engaged. Normal reading. ({fused_state.lower()})"
             self.last_tip_time = now 
+
+        voice_prompt = None
+        sustained_off_text = self.off_text_frames >= 6 and (now - self.last_voice_prompt_time) >= self.voice_prompt_cooldown
+        sustained_distracted = self.distracted_frames >= 6 and (now - self.last_voice_prompt_time) >= self.voice_prompt_cooldown
+        if (sustained_off_text or sustained_distracted) and self.voice_assistant is not None:
+            self.last_voice_prompt_time = now
+            voice_prompt = "It looks like you might need help understanding this PDF. Would you like me to explain the section you are reading?"
+            self.voice_assistant.speak(voice_prompt)
+            self.system_message = "VOICE: Offering help because the user appears distracted or off-text."
         
         return {
             "help_active": self.help_active,
@@ -243,7 +376,8 @@ class DialogController:
             "triggered_para": triggered_para,
             "needs_summary": needs_summary,
             "face_score": face_struggle,
-            "profile": self.user_profile
+            "profile": self.user_profile,
+            "voice_prompt": voice_prompt,
         }
 
     def reset_intervention(self):
