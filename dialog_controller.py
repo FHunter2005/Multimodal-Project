@@ -141,11 +141,11 @@ class DialogController:
             "Deep Focus": []
         }
 
-        # Struggle cues still matter, but less than before so concentration can dominate.
-        struggle_strength = min(1.0, face_struggle * 0.45)
-        if confusion > 0.25:
-            struggle_strength = max(struggle_strength, min(1.0, confusion * 0.85))
-        if struggle_strength > 0.25:
+        # Struggle cues still matter, but only strong signals should push into stuck.
+        struggle_strength = min(1.0, face_struggle * 0.30)
+        if confusion > 0.35:
+            struggle_strength = max(struggle_strength, min(1.0, confusion * 0.75))
+        if struggle_strength > 0.35:
             evidence_pool["Struggling / Stuck"].append(struggle_strength)
 
         sustained_same_block = False
@@ -158,23 +158,23 @@ class DialogController:
                     dx = gaze_x - last_x
                     dy = gaze_y - last_y
                     if abs(dx) <= 90 and abs(dy) <= 70:
-                        self.same_block_fixation_frames += 1.0
-                        if self.same_block_fixation_frames > 25:
-                            self.same_block_fixation_frames += 0.35
+                        self.same_block_fixation_frames += 0.45
+                        if self.same_block_fixation_frames > 60:
+                            self.same_block_fixation_frames += 0.10
                     else:
-                        self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 1.0)
+                        self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 2.0)
                 else:
-                    self.same_block_fixation_frames += 0.8
+                    self.same_block_fixation_frames += 0.35
             else:
-                self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 4.0)
+                self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 8.0)
 
             self.same_block_fixation_frames = min(400.0, self.same_block_fixation_frames)
-            same_block_stuck_score = min(1.0, 0.02 + (self.same_block_fixation_frames / 120.0))
+            same_block_stuck_score = min(1.0, 0.02 + (self.same_block_fixation_frames / 280.0))
         else:
-            self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 1.5)
+            self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 3.0)
 
-        if sustained_same_block and current_para is not None:
-            evidence_pool["Struggling / Stuck"].append(min(1.0, same_block_stuck_score * 1.35))
+        if sustained_same_block and current_para is not None and same_block_stuck_score > 0.30:
+            evidence_pool["Struggling / Stuck"].append(min(1.0, same_block_stuck_score * 1.10))
             evidence_pool["Reading (Focused)"].append(0.04)
             evidence_pool["Deep Focus"].append(0.02)
 
@@ -215,12 +215,12 @@ class DialogController:
             evidence_pool["Thinking (Off-Text)"].append(0.95)
             evidence_pool["Distracted"].append(0.70)
         elif gaze_state in evidence_pool:
-            if gaze_state == "Struggling / Stuck":
+            if gaze_state == "Struggling / Stuck" and gaze_struggle_score > 0.65:
                 evidence_pool[gaze_state].append(min(0.35, gaze_struggle_score * 0.35))
             elif gaze_state == "Reading (Focused)":
                 bottom_penalty = min(0.3, (gaze_y - 750) / 1000.0) if gaze_y > 750 else 0.0
                 intensity = max(0.1, (1.0 - gaze_struggle_score) - bottom_penalty)
-                evidence_pool[gaze_state].append(intensity) 
+                evidence_pool[gaze_state].append(intensity)
             elif gaze_state == "Deep Focus":
                 bottom_penalty = min(0.4, (gaze_y - 750) / 1000.0) if gaze_y > 750 else 0.0
                 evidence_pool[gaze_state].append(max(0.1, 0.8 - bottom_penalty))
@@ -273,10 +273,10 @@ class DialogController:
         # ---------------------------------------------------------
         if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.struggle_frames = max(0, self.struggle_frames - 10)
-        elif fused_state == "Struggling / Stuck" and fused_intensity > 0.40:
+        if fused_state == "Struggling / Stuck" and fused_intensity > 0.65:
             self.struggle_frames += 1
         else:
-            self.struggle_frames = max(0, self.struggle_frames - 2)
+            self.struggle_frames = max(0, self.struggle_frames - 6)
 
         distraction_evidence = 0.0
         if fused_state in {"Thinking (Off-Text)", "Distracted"}:

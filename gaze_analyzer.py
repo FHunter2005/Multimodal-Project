@@ -39,6 +39,7 @@ class GazeReadingAnalyzer:
         REGRESSION_X_THRESHOLD = -30  # Jumped back 30+ pixels
         LINE_CHANGE_Y_THRESHOLD = 40  # Moved down a line
         FIXATION_RADIUS = 25          # Pixels
+        LONG_FIXATION_SECONDS = 0.85  # Require longer fixations before penalizing
         
         # 1. Count Regressions
         for i in range(1, len(self.history)):
@@ -63,25 +64,25 @@ class GazeReadingAnalyzer:
                 end_idx += 1
                 
             duration = self.history[end_idx-1][0] - start_t
-            if duration > 0.500: # 500 milliseconds
+            if duration > LONG_FIXATION_SECONDS: # Require a longer sustained fixation
                 long_fixations += 1
                 
             fixation_start_idx = end_idx + 1
 
         # 3. Calculate Struggle Score
-        regression_penalty = min(1.0, regressions / 4.0)       
-        fixation_penalty = min(1.0, long_fixations / 2.0)      
+        regression_penalty = min(1.0, regressions / 4.0)
+        fixation_penalty = min(1.0, long_fixations / 3.0)
         struggle_score = max(0.0, min(1.0, (regression_penalty * 0.40) + (fixation_penalty * 0.60)))
         
         # 4. Determine Reading State
-        current_state = self._determine_state(struggle_score, long_fixations)
+        current_state = self._determine_state(struggle_score, long_fixations, regressions)
 
         return {
             "score": struggle_score,
             "state": current_state
         }
 
-    def _determine_state(self, struggle_score, fixations):
+    def _determine_state(self, struggle_score, fixations, regressions):
         """
         Applies spatial heuristics to classify what the user is actually doing.
         """
@@ -104,7 +105,7 @@ class GazeReadingAnalyzer:
         if on_paper_ratio < 0.50:
             return "Thinking (Off-Text)"
             
-        if struggle_score > 0.60:
+        if struggle_score > 0.70 and (fixations > 1 or regressions > 0):
             return "Struggling / Stuck"
             
         if spread_y > 400 and spread_x > 800:
