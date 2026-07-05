@@ -18,6 +18,7 @@ class FaceModalityTracker:
             base_options=python.BaseOptions(model_asset_path='face_landmarker.task'), 
             num_faces=1, min_face_detection_confidence=0.5, min_tracking_confidence=0.5, 
             output_face_blendshapes=True, running_mode=vision.RunningMode.LIVE_STREAM, 
+            output_facial_transformation_matrixes=True,
             result_callback=self._mp_callback)
         self.detector = vision.FaceLandmarker.create_from_options(options)
 
@@ -28,6 +29,8 @@ class FaceModalityTracker:
                 # --- NEW: Grab landmarks for proximity tracking ---
                 if result.face_landmarks:
                     self.latest_landmarks = result.face_landmarks[0]
+                if result.facial_transformation_matrixes:
+                     self.latest_matrix = result.facial_transformation_matrixes[0]
                 self.new_data_available = True
 
     def process_frame(self, image_rgb, timestamp_ms):
@@ -38,11 +41,12 @@ class FaceModalityTracker:
         process_new_frame = False
         bs = None
         lm = None  # <--- Added lm
-
+        matrix = None
         with self.landmark_lock:
             if self.new_data_available:
                 bs = self.latest_blendshapes
                 lm = getattr(self, 'latest_landmarks', None) # <--- Extract landmarks safely
+                matrix = getattr(self, 'latest_matrix', None)
                 self.new_data_available = False
                 process_new_frame = True
 
@@ -56,7 +60,7 @@ class FaceModalityTracker:
                 self.is_blinking = False
                 self.blink_history.append(0)
 
-        return process_new_frame, bs, lm # <--- Return all three
+        return process_new_frame, bs, lm, matrix # <--- Return all three
 
     def get_fatigue_score(self):
         if len(self.blink_history) > 100:

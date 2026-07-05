@@ -2,7 +2,7 @@ import time
 
 
 class DialogController:
-    def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=10.0, tip_cooldown=30.0, voice_assistant=None):
+    def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=5.0, tip_cooldown=30.0, voice_assistant=None):
         self.struggle_frames = 0
         self.help_active = False
         self.system_message = "Listening to User State..."
@@ -94,7 +94,10 @@ class DialogController:
         confusion = epistemic_state.get('confusion', 0.0) if isinstance(epistemic_state, dict) else 0.0
         anger = emotion_scores.get('anger', 0.0) if isinstance(emotion_scores, dict) else 0.0
         sadness = emotion_scores.get('sadness', 0.0) if isinstance(emotion_scores, dict) else 0.0
-        
+        frustration = epistemic_state.get('frustration', 0.0) if isinstance(epistemic_state, dict) else 0.0
+        epistemic_struggle = max(confusion, frustration)
+        if epistemic_struggle > 0.30:
+            evidence_pool["Struggling / Stuck"].append(min(1.0, epistemic_struggle * 1.5))
         plutchik_frustration = (anger * 0.70) + (sadness * 0.30)
         face_struggle = max(confusion, plutchik_frustration)
         physical_cues = physical_cues or {}
@@ -141,12 +144,17 @@ class DialogController:
             "Deep Focus": []
         }
 
-        # Struggle cues still matter, but only strong signals should push into stuck.
-        struggle_strength = min(1.0, face_struggle * 0.30)
+        # --- INTEGRATE EPISTEMIC STATES ---
+        # High confusion or frustration is a direct vote for "Struggling / Stuck"
         if confusion > 0.35:
-            struggle_strength = max(struggle_strength, min(1.0, confusion * 0.75))
-        if struggle_strength > 0.35:
-            evidence_pool["Struggling / Stuck"].append(struggle_strength)
+            evidence_pool["Struggling / Stuck"].append(min(1.0, confusion * 1.2))
+        if plutchik_frustration > 0.40:
+            evidence_pool["Struggling / Stuck"].append(min(1.0, plutchik_frustration * 1.2))
+            
+        # If the user is confused, they are explicitly NOT in Deep Focus or Reading Focused
+        if confusion > 0.20:
+            evidence_pool["Reading (Focused)"].append(max(0.0, 0.4 - confusion))
+            evidence_pool["Deep Focus"].append(max(0.0, 0.3 - confusion))
 
         sustained_same_block = False
         same_block_stuck_score = 0.0
@@ -233,33 +241,26 @@ class DialogController:
         instant_intensities = {k: 0.0 for k in evidence_pool.keys()}
         for state, votes in evidence_pool.items():
             if len(votes) > 0:
-                instant_intensities[state] = sum(votes) / len(votes)
+                # Add a bias: if epistemic states are high, use the max vote instead of average
+                # This ensures one strong sign of confusion/frustration drives the state
+                if state == "Struggling / Stuck":
+                    instant_intensities[state] = max(votes) 
+                else:
+                    instant_intensities[state] = sum(votes) / len(votes)
 
         best_smoothed_val = -1.0
         new_fused_state = self.current_fused_state
         new_fused_intensity = 0.0
         
         for state in self.smoothed_intensities.keys():
-            self.smoothed_intensities[state] = (self.state_alpha * instant_intensities[state]) + ((1.0 - self.state_alpha) * self.smoothed_intensities[state])
+            # Use a slightly faster alpha for epistemic states if we want immediate reaction
+            alpha = 0.15 if state == "Struggling / Stuck" else self.state_alpha
+            self.smoothed_intensities[state] = (alpha * instant_intensities[state]) + ((1.0 - alpha) * self.smoothed_intensities[state])
             
             if self.smoothed_intensities[state] > best_smoothed_val:
                 best_smoothed_val = self.smoothed_intensities[state]
                 new_fused_state = state
                 new_fused_intensity = self.smoothed_intensities[state]
-
-        # Handle specific overrides using raw face_struggle
-        if new_fused_state == "Deep Focus" and face_struggle < 0.5:
-            pass # Keep it as Deep Focus
-
-        if not face_looking_at_screen and (gaze_off_screen or current_para is None):
-            new_fused_state = "Thinking (Off-Text)"
-            new_fused_intensity = max(new_fused_intensity, 0.90)
-        elif head_turned_away and (gaze_off_screen or current_para is None):
-            new_fused_state = "Thinking (Off-Text)"
-            new_fused_intensity = max(new_fused_intensity, 0.80)
-        elif (gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None):
-            new_fused_state = "Distracted"
-            new_fused_intensity = max(new_fused_intensity, 0.75)
 
         self.current_fused_state = new_fused_state
         fused_state = new_fused_state
@@ -273,7 +274,7 @@ class DialogController:
         # ---------------------------------------------------------
         if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.struggle_frames = max(0, self.struggle_frames - 10)
-        if fused_state == "Struggling / Stuck" and fused_intensity > 0.65:
+        if fused_state == "Struggling / Stuck" or (confusion > 0.4 or frustration > 0.4):
             self.struggle_frames += 1
         else:
             self.struggle_frames = max(0, self.struggle_frames - 6)

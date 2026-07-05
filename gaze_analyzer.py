@@ -111,8 +111,7 @@ class GazeReadingAnalyzer:
         if spread_y > 400 and spread_x > 800:
             return "Distracted"
             
-        if dy_total > 150 and fixations <= 1 and spread_x < 600:
-            return "Skimming"
+
             
         if dy_total < -100:
             return "Scanning (Upwards)"
