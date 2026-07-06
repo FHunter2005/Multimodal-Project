@@ -298,19 +298,24 @@ class ReaderHelperApp:
             
         # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
   
-        if self.face_tracker.get_fatigue_score() > 0.15: 
+        # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
+        if self.face_tracker.get_fatigue_score() > 30: 
             self.dialog_controller.system_message = "INTERVENTION: High Fatigue Detected. Consider a screen break."
             self.dialog_controller.help_active = True
             
             current_time = time.time()
-            if not hasattr(self, 'last_fatigue_spoken_time') or (current_time - self.last_fatigue_spoken_time) > 60.0:
+            # ADDED: Check if prompt_active is False
+            if not getattr(self, 'prompt_active', False) and (current_time - getattr(self, 'last_fatigue_spoken_time', 0.0)) > 60.0:
                 self.voice_assistant.speak("It seems like you're quite tired. Let's take a quick break and in the meantime I will create a summary of what you read?")
                 
                 # Activate the visual prompt
                 self.prompt_active = True
                 self.prompt_text = "Take break & summarize? (Y/N)"
                 
+                # Sync global cooldowns
                 self.last_fatigue_spoken_time = current_time
+                self.last_spoken_time = current_time 
+        # ----------------------------------------------------------------
         # ----------------------------------------------------------------
         # ----------------------------------------------------------------
             
@@ -356,7 +361,15 @@ class ReaderHelperApp:
                     self.current_gaze_state = "Skimming"
 
             # 3. Head Posture Distraction Override
+            # 3. Head Posture Distraction Override (BUFFERED)
+            # Increment a counter if they look away, decay it quickly if they look back
             if getattr(self, 'head_distraction_score', 0.0) > 0.60:
+                self.head_away_frames = getattr(self, 'head_away_frames', 0) + 1
+            else:
+                self.head_away_frames = max(0, getattr(self, 'head_away_frames', 0) - 2)
+
+            # [TIME USER: LOOKING AWAY]
+            if getattr(self, 'head_away_frames', 0) > 200:
                 self.current_gaze_state = "Distracted"
                 self.current_gaze_score = max(self.current_gaze_score, self.head_distraction_score)
 
@@ -364,8 +377,12 @@ class ReaderHelperApp:
             current_time = time.time()
             finalized_state = self.current_gaze_state
 
+            # Calculate strict cooldown (default to 45 seconds)
+            time_since_last_spoken = current_time - getattr(self, 'last_spoken_time', 0.0)
+
             if finalized_state in ["Distracted", "Thinking (Off-Text)"]:
-                if finalized_state != getattr(self, 'last_spoken_state', None) or (current_time - getattr(self, 'last_spoken_time', 0.0)) > 30.0:
+                # ONLY trigger if no prompt is currently active AND cooldown has passed
+                if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
                     
                     if finalized_state == "Distracted":
                         self.voice_assistant.speak("Would you like me to summarize the paper for you?")
@@ -376,10 +393,15 @@ class ReaderHelperApp:
                     
                     self.prompt_active = True
                     self.last_spoken_state = finalized_state
+                    
+                    # Sync global cooldowns
                     self.last_spoken_time = current_time
+                    self.last_fatigue_spoken_time = current_time 
 
             elif finalized_state in ["Reading (Focused)", "Deep Focus", "Skimming", "Scanning (Upwards)"]:
                 self.last_spoken_state = None
+
+        
             # -------------------------------------------
             # --- NEW BLENDSHAPE SKIMMING LOGIC ---
             if len(self.vertical_gaze_history) >= 15:
@@ -415,18 +437,41 @@ class ReaderHelperApp:
                     )
                 )
 
-                if invalid_for_paragraph:
-                    self.stable_hov = None
-                    self.hover_switch_time = time.time()
-                    if self.dialog_controller.cur_para is not None:
-                        self.dialog_controller.reset_dwell()
-                elif not self.dlg_active and paras and pw > 0:
+                # Replace your existing 'invalid_for_paragraph' block and subsequent loop with this:
+
+            if invalid_for_paragraph:
+                self.stable_hov = None
+                self.hover_switch_time = time.time()
+                if self.dialog_controller.cur_para is not None:
+                    self.dialog_controller.reset_dwell()
+            elif not self.dlg_active and paras and pw > 0:
+                
+                keep_current = False
+                current_hover = None
+                
+                # 1. Hysteresis Check: If we already have a hovered paragraph, check if we are still in its "sticky" zone
+                if self.stable_hov is not None and self.stable_hov < len(paras):
+                    bx0, by0, bx1, by1 = paras[self.stable_hov]["bbox"]
+                    
+                    # Apply a generous 'sticky' margin to prevent flickering
+                    sticky_margin_x = max(120, (bx1 - bx0) * 0.3) 
+                    sticky_margin_y = 60 
+                    
+                    if (bx0 - sticky_margin_x <= gpx <= bx1 + sticky_margin_x) and \
+                    (by0 - sticky_margin_y <= gpy <= by1 + sticky_margin_y):
+                        current_hover = self.stable_hov
+                        keep_current = True
+
+                # 2. Only search for a new paragraph if we broke out of the sticky zone
+                if not keep_current:
                     best_idx = None
                     best_dist = float('inf')
                     for pi, para in enumerate(paras):
                         bx0, by0, bx1, by1 = para["bbox"]
                         x_margin = max(80, (bx1 - bx0) * 0.2)
                         y_center = (by0 + by1) / 2.0
+                        
+                        # Standard, tighter bounding box for initial selection
                         if bx0 - x_margin <= gpx <= bx1 + x_margin:
                             vd = abs(gpy - y_center)
                             if vd < best_dist:
@@ -434,16 +479,18 @@ class ReaderHelperApp:
                                 best_idx = pi
 
                     current_hover = best_idx if best_idx is not None and best_dist < 140 else None
-                    now = time.time()
-                    if current_hover is None:
-                        self.stable_hov = None
-                        self.hover_switch_time = now
-                    elif self.stable_hov is None:
-                        self.stable_hov = current_hover
-                        self.hover_switch_time = now
-                    elif current_hover != self.stable_hov and (now - self.hover_switch_time) > 0.15:
-                        self.stable_hov = current_hover
-                        self.hover_switch_time = now
+
+                # 3. Time-gated switching logic (Keep your existing debounce logic)
+                now = time.time()
+                if current_hover is None:
+                    self.stable_hov = None
+                    self.hover_switch_time = now
+                elif self.stable_hov is None:
+                    self.stable_hov = current_hover
+                    self.hover_switch_time = now
+                elif current_hover != self.stable_hov and (now - self.hover_switch_time) > 0.15:
+                    self.stable_hov = current_hover
+                    self.hover_switch_time = now
 
         if self.gaze_reader.is_calibrated:
     

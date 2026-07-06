@@ -1,5 +1,5 @@
 import time
-
+from collections import deque
 
 class DialogController:
     def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=5.0, tip_cooldown=30.0, voice_assistant=None):
@@ -34,7 +34,12 @@ class DialogController:
         
         # Data buffers to establish baseline (Mouse only now)
         self.calib_mouse_intensities = []
-        
+        self.intervention_buffer = deque(maxlen=30)  # Holds ~1 second of frames at 30fps
+        self.config = {
+            "frust_thresh": 0.60,
+            "face_struggle_thresh": 0.30,
+            "consensus_required": 22  # Require 22 out of 30 frames to agree
+        }
         # Dynamic User Profile (Facial baselines removed)
         self.user_profile = {
             "is_mouse_reader": True
@@ -96,8 +101,7 @@ class DialogController:
         sadness = emotion_scores.get('sadness', 0.0) if isinstance(emotion_scores, dict) else 0.0
         frustration = epistemic_state.get('frustration', 0.0) if isinstance(epistemic_state, dict) else 0.0
         epistemic_struggle = max(confusion, frustration)
-        if epistemic_struggle > 0.30:
-            evidence_pool["Struggling / Stuck"].append(min(1.0, epistemic_struggle * 1.5))
+        
         plutchik_frustration = (anger * 0.70) + (sadness * 0.30)
         face_struggle = max(confusion, plutchik_frustration)
         physical_cues = physical_cues or {}
@@ -143,7 +147,9 @@ class DialogController:
             "Thinking (Off-Text)": [],
             "Deep Focus": []
         }
-
+        
+        if epistemic_struggle > 0.30:
+            evidence_pool["Struggling / Stuck"].append(min(1.0, epistemic_struggle * 1.5))
         # --- INTEGRATE EPISTEMIC STATES ---
         # High confusion or frustration is a direct vote for "Struggling / Stuck"
         if confusion > 0.35:
@@ -152,9 +158,9 @@ class DialogController:
             evidence_pool["Struggling / Stuck"].append(min(1.0, plutchik_frustration * 1.2))
             
         # If the user is confused, they are explicitly NOT in Deep Focus or Reading Focused
-        if confusion > 0.20:
-            evidence_pool["Reading (Focused)"].append(max(0.0, 0.4 - confusion))
-            evidence_pool["Deep Focus"].append(max(0.0, 0.3 - confusion))
+        if face_struggle > 0.25:
+            evidence_pool["Reading (Focused)"].append(max(0.0, 0.4 - face_struggle))
+            evidence_pool["Deep Focus"].append(max(0.0, 0.3 - face_struggle))
 
         sustained_same_block = False
         same_block_stuck_score = 0.0
@@ -247,6 +253,10 @@ class DialogController:
                     instant_intensities[state] = max(votes) 
                 else:
                     instant_intensities[state] = sum(votes) / len(votes)
+                # If the face is struggling, Reading/Deep Focus CANNOT mathematically exceed a certain threshold
+                if state in ["Reading (Focused)", "Deep Focus"] and face_struggle > 0.35:
+                    # e.g., If face_struggle is 0.6, Reading is capped at 0.4
+                    instant_intensities[state] = min(instant_intensities[state], 1.0 - face_struggle)
 
         best_smoothed_val = -1.0
         new_fused_state = self.current_fused_state
@@ -323,21 +333,56 @@ class DialogController:
                 self.para_fv = True
                 
                 # --- DECISION ENGINE (GATED BY COOLDOWN) ---
+                # Replace your existing "DECISION ENGINE (GATED BY COOLDOWN)" block with this:
+
                 if not in_cooldown:
-                    self.last_tip_time = now 
-                    # Using raw face_struggle here
-                    if plutchik_frustration > 0.6 and face_struggle > 0.3:
-                        self.help_active = True
-                        self.system_message = "INTERVENTION: High Frustration. Take a short break, don't force it."
+                    # 1. Determine instantaneous intervention need for THIS frame
+                    instant_need = False
+                    instant_msg = ""
+                    instant_trigger_para = None
+                    instant_needs_sum = False
+
+                    if plutchik_frustration > self.config["frust_thresh"] and face_struggle > self.config["face_struggle_thresh"]:
+                        instant_need = True
+                        instant_msg = "INTERVENTION: High Frustration. Take a short break, don't force it."
                     elif fused_state == "Thinking (Off-Text)":
+                        instant_need = True
+                        instant_msg = "INTERVENTION: Taking time to process. Let me know if you need help."
+                    elif fused_state == "Struggling / Stuck":
+                        instant_need = True
+                        instant_trigger_para = current_para
+                        instant_needs_sum = True
+                        instant_msg = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
+
+                    # 2. Append to rolling buffer
+                    self.intervention_buffer.append({
+                        "needed": instant_need,
+                        "msg": instant_msg,
+                        "para": instant_trigger_para,
+                        "summary": instant_needs_sum
+                    })
+
+                    # 3. Evaluate Consensus (Has the user been struggling for the majority of the last second?)
+                    positive_frames = [frame for frame in self.intervention_buffer if frame["needed"]]
+                    
+                    if len(positive_frames) >= self.config["consensus_required"]:
+                        self.last_tip_time = now 
                         self.help_active = True
-                        self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
-                    else:
-                        triggered_para = current_para
-                        needs_summary = True
-                        self.help_active = True
-                        self.system_message = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
-        
+                        
+                        # Trigger based on the most common state in the positive frames
+                        # (e.g., if they were mostly frustrated, show the frustration message)
+                        counts = {}
+                        for frame in positive_frames:
+                            counts[frame["msg"]] = counts.get(frame["msg"], 0) + 1
+                            
+                        best_match = max(positive_frames, key=lambda f: counts[f["msg"]])
+                        
+                        self.system_message = best_match["msg"]
+                        triggered_para = best_match["para"]
+                        needs_summary = best_match["summary"]
+                        
+                        # Flush the buffer after a successful trigger to prevent double-firing
+                        self.intervention_buffer.clear()
         # ---------------------------------------------------------
         # 7. GLOBAL STATE INTERVENTIONS
         # ---------------------------------------------------------
@@ -359,14 +404,7 @@ class DialogController:
             self.system_message = f"User engaged. Normal reading. ({fused_state.lower()})"
             self.last_tip_time = now 
 
-        voice_prompt = None
-        sustained_off_text = self.off_text_frames >= 6 and (now - self.last_voice_prompt_time) >= self.voice_prompt_cooldown
-        sustained_distracted = self.distracted_frames >= 6 and (now - self.last_voice_prompt_time) >= self.voice_prompt_cooldown
-        if (sustained_off_text or sustained_distracted) and self.voice_assistant is not None:
-            self.last_voice_prompt_time = now
-            voice_prompt = "It looks like you might need help understanding this PDF. Would you like me to explain the section you are reading?"
-            self.voice_assistant.speak(voice_prompt)
-            self.system_message = "VOICE: Offering help because the user appears distracted or off-text."
+       
         
         return {
             "help_active": self.help_active,
@@ -378,7 +416,7 @@ class DialogController:
             "needs_summary": needs_summary,
             "face_score": face_struggle,
             "profile": self.user_profile,
-            "voice_prompt": voice_prompt,
+
         }
 
     def reset_intervention(self):

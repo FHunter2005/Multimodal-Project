@@ -3,6 +3,8 @@ import threading
 from collections import deque
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import time
+from collections import deque
 
 class FaceModalityTracker:
     def __init__(self, blink_threshold=0.35):
@@ -13,6 +15,12 @@ class FaceModalityTracker:
         
         self.is_blinking = False
         self.blink_history = deque(maxlen=900)
+        self.fatigue_window = 60.0     # Track blinks over a rolling 60-second window
+        self.is_blinking = False
+        self.blink_timestamps = deque()
+        # NEW: Hysteresis thresholds to ignore squinting
+        self.blink_enter_thresh = 0.45 # Eyes must close this much to count as a blink
+        self.blink_exit_thresh = 0.25  # Eyes must open this much to reset for the next blink
 
         options = vision.FaceLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path='face_landmarker.task'), 
@@ -40,12 +48,13 @@ class FaceModalityTracker:
     def update_state(self):
         process_new_frame = False
         bs = None
-        lm = None  # <--- Added lm
+        lm = None
         matrix = None
+        
         with self.landmark_lock:
             if self.new_data_available:
                 bs = self.latest_blendshapes
-                lm = getattr(self, 'latest_landmarks', None) # <--- Extract landmarks safely
+                lm = getattr(self, 'latest_landmarks', None)
                 matrix = getattr(self, 'latest_matrix', None)
                 self.new_data_available = False
                 process_new_frame = True
@@ -53,19 +62,26 @@ class FaceModalityTracker:
         if process_new_frame and bs is not None:
             blink_l = next((cat.score for cat in bs if cat.category_name == 'eyeBlinkLeft'), 0.0)
             blink_r = next((cat.score for cat in bs if cat.category_name == 'eyeBlinkRight'), 0.0)
-            if (blink_l + blink_r) / 2.0 > self.blink_threshold:
-                self.is_blinking = True
-                self.blink_history.append(1)
-            else:
-                self.is_blinking = False
-                self.blink_history.append(0)
+            eye_closed_score = (blink_l + blink_r) / 2.0
+            
+            current_time = time.time()
 
-        return process_new_frame, bs, lm, matrix # <--- Return all three
+            # 1. Hysteresis Logic: Detect discrete blinks, ignore sustained squints
+            if eye_closed_score > self.blink_enter_thresh and not self.is_blinking:
+                self.is_blinking = True
+                self.blink_timestamps.append(current_time) # Log the exact moment of the blink
+            elif eye_closed_score < self.blink_exit_thresh and self.is_blinking:
+                self.is_blinking = False # Reset only when eyes open back up
+
+            # 2. Prune old blinks that fall outside our 60-second window
+            while self.blink_timestamps and (current_time - self.blink_timestamps[0] > self.fatigue_window):
+                self.blink_timestamps.popleft()
+
+        return process_new_frame, bs, lm, matrix
 
     def get_fatigue_score(self):
-        if len(self.blink_history) > 100:
-            return sum(self.blink_history) / len(self.blink_history)
-        return 0.0
+        # Now returns the absolute integer count of blinks in the last 60 seconds
+        return len(self.blink_timestamps)
 
     def stop(self):
         self.detector.close()
