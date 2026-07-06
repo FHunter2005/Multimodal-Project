@@ -390,14 +390,19 @@ class DialogController:
             if not in_cooldown:
                 self.last_tip_time = now 
                 self.help_active = True
-                if plutchik_frustration > confusion: 
-                    self.system_message = "INTERVENTION: High Frustration. Take a short break."
-                elif fused_state == "Thinking (Off-Text)": 
-                    self.system_message = "INTERVENTION: Processing information. No rush."
-                elif fused_intensity > 0.6: 
-                    self.system_message = "INTERVENTION: High Cognitive Load detected. Relax your eyes."
-                else: 
-                    self.system_message = "INTERVENTION: Confusion detected. Reading pace adjusted."
+                if fused_state == "Thinking (Off-Text)":
+                    self.help_active = True
+                    self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
+                else:
+                    # Catch both standard struggling AND high frustration here
+                    triggered_para = current_para
+                    needs_summary = True
+                    self.help_active = True
+                    
+                    if plutchik_frustration > 0.6:
+                        self.system_message = "INTERVENTION: High Frustration detected. Generating paragraph summary..."
+                    else:
+                        self.system_message = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
                 
         elif self.struggle_frames == 0 and self.help_active and not needs_summary:
             self.help_active = False

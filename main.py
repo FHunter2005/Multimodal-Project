@@ -15,7 +15,7 @@ import argparse
 import sys
 from collections import deque
 from pathlib import Path
-
+from pdf_context import get_help_text_for_paragraph
 # External Modalities (Assumed existing)
 from local_epistemic_tracker import LocalEpistemicTracker
 from emotion_wheel import EmotionDetector, PlutchikWheel
@@ -99,7 +99,8 @@ class ReaderHelperApp:
         # Unfiltered Raw Coordinate tracking
         self.gaze_x, self.gaze_y = self.SCREEN_W // 2, self.SCREEN_H // 2
         self.system_action = None
-
+        self.face_tracker.start_calibration()
+        self.baseline_finished = False
         self.mouse_tracker.start()
         self.last_frame_id = -1
         self.display_image = None
@@ -249,7 +250,9 @@ class ReaderHelperApp:
         self.mouse_score = self.mouse_tracker.get_data()
         emotion_state = self.emotion_detector.update(bs) if (process_new_frame and bs) else self.emotion_detector.scores
         # --------------------------
-
+        if self.gaze_reader.is_calibrated and not getattr(self, 'baseline_finished', False):
+            self.face_tracker.stop_calibration()
+            self.baseline_finished = True
         if process_new_frame:
             # 2. Extract true 3D head rotation
             yaw, pitch, roll = 0.0, 0.0, 0.0
@@ -299,22 +302,20 @@ class ReaderHelperApp:
         # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
   
         # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
-        if self.face_tracker.get_fatigue_score() > 30: 
+        if self.face_tracker.is_fatigued(): 
             self.dialog_controller.system_message = "INTERVENTION: High Fatigue Detected. Consider a screen break."
             self.dialog_controller.help_active = True
             
             current_time = time.time()
-            # ADDED: Check if prompt_active is False
+            
             if not getattr(self, 'prompt_active', False) and (current_time - getattr(self, 'last_fatigue_spoken_time', 0.0)) > 60.0:
                 self.voice_assistant.speak("It seems like you're quite tired. Let's take a quick break and in the meantime I will create a summary of what you read?")
                 
-                # Activate the visual prompt
                 self.prompt_active = True
                 self.prompt_text = "Take break & summarize? (Y/N)"
                 
-                # Sync global cooldowns
                 self.last_fatigue_spoken_time = current_time
-                self.last_spoken_time = current_time 
+                self.last_spoken_time = current_time
         # ----------------------------------------------------------------
         # ----------------------------------------------------------------
         # ----------------------------------------------------------------
@@ -433,7 +434,7 @@ class ReaderHelperApp:
                 gaze_context = self._estimate_gaze_context()
                 invalid_for_paragraph = (
                     not self.dlg_active and paras and pw > 0 and (
-                        not on_paper or self.head_turned_away or gaze_context.get('gaze_off_screen', False) or gaze_context.get('gaze_wandering', False)
+                        not on_paper or self.head_turned_away or gaze_context.get('gaze_off_screen', False)
                     )
                 )
 
@@ -515,18 +516,24 @@ class ReaderHelperApp:
 
         # 7. Generate PDF Summaries if needed
         # Safely check system_action (it might be None during calibration)
+        # 7. Generate PDF Summaries if needed
+        # 7. Generate PDF Summaries if needed
         triggered_para_idx = self.system_action.get("triggered_para") if self.system_action else None
         needs_summary = self.system_action.get("needs_summary", False) if self.system_action else False
         
         if triggered_para_idx is not None and needs_summary and not self.dlg_active and self.inference_mode:
-            _, paras = self.pdf.get_page(self.page)
-            if paras:
-                self.dlg_active = True
-                self.dlg_para = paras[triggered_para_idx]
-                self.dlg_summary['text'] = None
+            # Check if a prompt isn't already on the screen
+            if not getattr(self, 'prompt_active', False):
+                # 1. Ask the user via voice and visual prompt
+                self.voice_assistant.speak("It seems like you might be stuck. Would you like a summary of this paragraph?")
+                self.prompt_text = "Show paragraph summary? (Y/N)"
+                self.prompt_active = True
                 
-                def _summ(text, box): box['text'] = summarize(text)
-                threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
+                # 2. Save the exact paragraph index they were struggling on
+                self.pending_help_para_idx = triggered_para_idx
+                
+               # def _summ(text, box): box['text'] = summarize(text)
+               # threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
     def _render(self):
         canvas = np.zeros((self.SCREEN_H, self.SCREEN_W, 3), dtype=np.uint8)
 
@@ -697,11 +704,27 @@ class ReaderHelperApp:
     
     def _mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_MOUSEWHEEL and self.inference_mode and not self.dlg_active:
-            self.last_scroll_time = time.time() # <-- ADD THIS
-            if flags > 0: 
-                self.scroll_y = max(0, self.scroll_y - SCROLL_STEP)
-            else:
-                self.scroll_y = min(self.max_scroll, self.scroll_y + SCROLL_STEP)
+            self.last_scroll_time = time.time() 
+            
+            if flags > 0: # Scrolling UP
+                if self.scroll_y == 0 and self.page > 0:
+                    # Turn to previous page and jump to the bottom
+                    self.page -= 1
+                    self.scroll_y = 99999 # _render() will automatically clamp this to max_scroll
+                    self.dialog_controller.reset_dwell()
+                    self.hov_buf.clear()
+                else:
+                    self.scroll_y = max(0, self.scroll_y - SCROLL_STEP)
+                    
+            else: # Scrolling DOWN
+                if self.scroll_y >= self.max_scroll and self.page < self.pdf.n - 1:
+                    # Turn to next page and jump to the top
+                    self.page += 1
+                    self.scroll_y = 0
+                    self.dialog_controller.reset_dwell()
+                    self.hov_buf.clear()
+                else:
+                    self.scroll_y = min(self.max_scroll, self.scroll_y + SCROLL_STEP)
 
     def _draw_calibration_ui(self, canvas, w, h):
         tx = int(CALIB_PTS[self.calib_index][0] * w)
@@ -775,22 +798,30 @@ class ReaderHelperApp:
         elif key_char in (ord('n'), ord('N')) and self.dlg_active:
             self.dlg_active = False; self.dlg_para = None; self.dlg_summary['text'] = None
         # --- NEW: Prompt Inputs (Bottom Right Window) ---
+        # --- NEW: Prompt Inputs (Bottom Right Window) ---
+        # --- NEW: Prompt Inputs (Bottom Right Window) ---
         elif key_char in (ord('y'), ord('Y')) and getattr(self, 'prompt_active', False):
             self.prompt_active = False
             
-            # Extract paragraphs and open the central summary window
             _, paras = self.pdf.get_page(self.page)
             if paras:
                 self.dlg_active = True
                 
-                # Default to the paragraph the user was last hovering over, or the top paragraph
-                target_idx = self.stable_hov if self.stable_hov is not None else 0
+                # 1. Check if we saved a specific struggling paragraph
+                if getattr(self, 'pending_help_para_idx', None) is not None:
+                    target_idx = self.pending_help_para_idx
+                    self.pending_help_para_idx = None # Clear it after using
+                else:
+                    # Fallback to the hovered paragraph if it was a different prompt (like fatigue)
+                    target_idx = self.stable_hov if self.stable_hov is not None else 0
+                    
                 self.dlg_para = paras[target_idx] if target_idx < len(paras) else paras[0]
-                self.dlg_summary['text'] = None
                 
+                # --- ATOMIC CONTEXT LOOKUP ---
+                self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
                 # Spawn the Gemini thread
-                def _summ(text, box): box['text'] = summarize(text)
-                threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
+               # def _summ(text, box): box['text'] = summarize(text)
+               # threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
                 
         elif key_char in (ord('n'), ord('N')) and getattr(self, 'prompt_active', False):
             self.prompt_active = False
