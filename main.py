@@ -22,7 +22,7 @@ from emotion_wheel import EmotionDetector, PlutchikWheel
 from mouse_analyzer import MouseReadingAnalyzer
 from gaze_analyzer import GazeReadingAnalyzer
 from gaze_core import GazeReader, CALIB_PTS, DRIFT_PTS
-
+from voice_listener import VoiceListener
 # Newly Modularized Files
 from ui_components import (SCREEN_W, SCREEN_H, SANDBOX_W, SANDBOX_H, WHEEL_W, WHEEL_H,
                            SAMPLES_NEEDED, BLINK_BLENDSHAPE_THRESHOLD, SCROLL_STEP,
@@ -83,6 +83,7 @@ class ReaderHelperApp:
         self.mouse_score = None
         # FUSED Dialog Controller
         self.voice_assistant = VoiceAssistant(enabled=True)
+        self.voice_listener = VoiceListener() # <--- NEW
         self.dialog_controller = DialogController(dwell=dwell, voice_assistant=VoiceAssistant(enabled=False))
         self.max_score = None
         # State tracking
@@ -91,7 +92,9 @@ class ReaderHelperApp:
         self.current_gaze_state = "Initializing"
         self.calib_index = 0
         self.sampling_active = False
-        
+        self.last_scroll_time = 0.0
+        self.scroll_active_duration = 0.0
+        self.last_fuse_time = time.time()
         # Drift Tracking
         self.drift_mode = False
         self.drift_index = 0
@@ -234,7 +237,15 @@ class ReaderHelperApp:
 
     def _update_and_fuse(self):
         if self.display_image is None: return
-
+        now = time.time()
+        dt = now - getattr(self, 'last_fuse_time', now)
+        self.last_fuse_time = now
+        
+        # If a scroll happened less than 250ms ago, consider the scroll "continuous"
+        if now - getattr(self, 'last_scroll_time', 0.0) < 0.25:
+            self.scroll_active_duration = getattr(self, 'scroll_active_duration', 0.0) + dt
+        else:
+            self.scroll_active_duration = 0.0
         # 1. Ask FaceModalityTracker for the latest data (now including the matrix)
         process_new_frame, bs, lm, matrix = self.face_tracker.update_state()
         if process_new_frame and bs:
@@ -312,8 +323,12 @@ class ReaderHelperApp:
                 self.voice_assistant.speak("It seems like you're quite tired. Let's take a quick break and in the meantime I will create a summary of what you read?")
                 
                 self.prompt_active = True
-                self.prompt_text = "Take break & summarize? (Y/N)"
                 
+                self.prompt_text = "Take break & summarize? (Y/N)"
+                self.voice_assistant.speak(
+                    "It seems like you're quite tired. Let's take a quick break and in the meantime I will create a summary of what you read?",
+                    on_finish=self.voice_listener.listen_async
+                )
                 self.last_fatigue_spoken_time = current_time
                 self.last_spoken_time = current_time
         # ----------------------------------------------------------------
@@ -346,10 +361,24 @@ class ReaderHelperApp:
             self.current_gaze_score =  self.current_gaze_data['score']
             self.current_gaze_state = self.current_gaze_data['state'] 
 
-            # 2. Skimming Override
+            # 2. Skimming Overrqide
             if len(self.vertical_gaze_history) >= 15:
-                gaze_variance = float(np.std(self.vertical_gaze_history))
-                eye_skimming_score = min(1.0, gaze_variance / 0.06) 
+                recent_gaze = list(self.vertical_gaze_history)[-15:]
+                instant_variance = float(np.std(recent_gaze))
+                
+                # --- NEW: Compounding Momentum Logic ---
+                # Safely fetch the current momentum (defaults to 0.0)
+                current_momentum = getattr(self, 'eye_skimming_momentum', 0.0)
+                
+                if instant_variance > 0.035: # Base threshold for "active" eye movement
+                    # Growth accelerates based on BOTH how wild the eyes are AND how long they've been moving
+                    growth_step = (instant_variance * 0.4) + (current_momentum * 0.08)
+                    self.eye_skimming_momentum = min(1.0, current_momentum + growth_step)
+                else:
+                    # Decay rapidly (0.15 per frame) when eyes stop so it doesn't get stuck
+                    self.eye_skimming_momentum = max(0.0, current_momentum - 0.15)
+                    
+                eye_skimming_score = self.eye_skimming_momentum
                 time_since_scroll = time.time() - getattr(self, 'last_scroll_time', 0.0)
                 is_scrolling = time_since_scroll < 1.0
                 
@@ -357,7 +386,14 @@ class ReaderHelperApp:
                     final_skimming_score = min(1.0, eye_skimming_score * 1.5 + 0.4)
                 else:
                     final_skimming_score = eye_skimming_score
-                    
+                # --- ADD THIS NEW CONTINUOUS SCROLL BYPASS ---
+                # If the user has been scrolling non-stop for more than 1.0 second
+                if getattr(self, 'scroll_active_duration', 0.0) > 1.0:
+                    # Creates a score that ramps up quickly the longer they scroll
+                    scroll_bypass_score = (self.scroll_active_duration - 1.0) * 1.5 
+                    # Force the score high, even if eye_skimming_score is 0.0
+                    final_skimming_score = min(1.0, max(final_skimming_score, 0.5 + scroll_bypass_score))
+                # ---------------------------------------------
                 if final_skimming_score > 0.65:
                     self.current_gaze_state = "Skimming"
 
@@ -386,13 +422,20 @@ class ReaderHelperApp:
                 if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
                     
                     if finalized_state == "Distracted":
-                        self.voice_assistant.speak("Would you like me to summarize the paper for you?")
                         self.prompt_text = "Summarize the paper? (Y/N)"
+                        self.voice_assistant.speak(
+                            "Would you like me to summarize the paper for you?", 
+                            on_finish=self.voice_listener.listen_async
+                        )
                     elif finalized_state == "Thinking (Off-Text)":
-                        self.voice_assistant.speak("Would you like me to explain to you the current part of the paper?")
                         self.prompt_text = "Explain current part? (Y/N)"
+                        self.voice_assistant.speak(
+                            "Would you like me to explain to you the current part of the paper?", 
+                            on_finish=self.voice_listener.listen_async
+                        )
                     
                     self.prompt_active = True
+    
                     self.last_spoken_state = finalized_state
                     
                     # Sync global cooldowns
@@ -508,6 +551,8 @@ class ReaderHelperApp:
                 'gaze_wandering': gaze_context.get('gaze_wandering', False),
                 'mouse_wandering': mouse_wandering,
             }
+            self.current_gaze_data['state'] = self.current_gaze_state
+            self.current_gaze_data['score'] = self.current_gaze_score
             self.system_action = self.dialog_controller.evaluate(
                 self.mouse_score, self.current_gaze_data, epistemic_state, emotion_state, self.stable_hov, physical_cues
             )
@@ -528,7 +573,7 @@ class ReaderHelperApp:
                 self.voice_assistant.speak("It seems like you might be stuck. Would you like a summary of this paragraph?")
                 self.prompt_text = "Show paragraph summary? (Y/N)"
                 self.prompt_active = True
-                
+              
                 # 2. Save the exact paragraph index they were struggling on
                 self.pending_help_para_idx = triggered_para_idx
                 
@@ -783,6 +828,28 @@ class ReaderHelperApp:
         cv2.putText(canvas, mouse_text, (hud_x, hud_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouse_color, 1)
         cv2.putText(canvas, f"Fusion Struggle Level: {action_state['struggle_level']:.2f}", (hud_x, hud_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
+    def _accept_prompt(self):
+        self.prompt_active = False
+        _, paras = self.pdf.get_page(self.page)
+        if paras:
+            self.dlg_active = True
+            
+            # 1. Check if we saved a specific struggling paragraph
+            if getattr(self, 'pending_help_para_idx', None) is not None:
+                target_idx = self.pending_help_para_idx
+                self.pending_help_para_idx = None # Clear it after using
+            else:
+                # Fallback to the hovered paragraph if it was a different prompt (like fatigue)
+                target_idx = self.stable_hov if self.stable_hov is not None else 0
+                
+            self.dlg_para = paras[target_idx] if target_idx < len(paras) else paras[0]
+            
+            # --- ATOMIC CONTEXT LOOKUP ---
+            self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
+
+    def _decline_prompt(self):
+        self.prompt_active = False
+
     def _handle_input(self):
         key = cv2.waitKey(1)
         key_char = key & 0xFF
@@ -822,7 +889,7 @@ class ReaderHelperApp:
                 # Spawn the Gemini thread
                # def _summ(text, box): box['text'] = summarize(text)
                # threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
-                
+        
         elif key_char in (ord('n'), ord('N')) and getattr(self, 'prompt_active', False):
             self.prompt_active = False
         # Reading Inputs
@@ -865,7 +932,19 @@ class ReaderHelperApp:
                     self.sampling_active = True
                     tx, ty = DRIFT_PTS[self.drift_index]
                     self.gaze_reader.begin_drift_point(tx, ty, self.gaze_reader.DRIFT_SAMPLES)
-
+        # 2. Handle Voice Commands (NEW)
+        if getattr(self, 'prompt_active', False):
+            voice_cmd = self.voice_listener.get_result()
+            if voice_cmd == 'Y':
+                print("[SYSTEM] Voice command accepted prompt.")
+                self._accept_prompt()
+            elif voice_cmd == 'N':
+                print("[SYSTEM] Voice command declined prompt.")
+                self._decline_prompt()
+            elif voice_cmd in ['TIMEOUT', 'UNKNOWN']:
+                # Optional: You can let it auto-dismiss or just leave the visual prompt up 
+                # so the user can still press the physical Y/N keys.
+                pass
     def cleanup(self):
         print("Cleaning up modules...")
         cv2.setMouseCallback('Reader & Dashboard', lambda *args: None)
