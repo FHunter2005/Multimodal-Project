@@ -21,27 +21,23 @@ class GazeReadingAnalyzer:
         current_time = time.time()
         self.history.append((current_time, x, y, on_paper))
         
-        # Slide window to drop old data
         while self.history and current_time - self.history[0][0] > self.window_size:
             self.history.popleft()
             
         return self._analyze_window()
 
     def _analyze_window(self):
-        # Default return if we don't have enough data yet
         if len(self.history) < 10:
             return {"score": 0.0, "state": "Initializing"}
 
         regressions = 0
         long_fixations = 0
         
-        # --- Parameters ---
-        REGRESSION_X_THRESHOLD = -30  # Jumped back 30+ pixels
-        LINE_CHANGE_Y_THRESHOLD = 40  # Moved down a line
-        FIXATION_RADIUS = 25          # Pixels
-        LONG_FIXATION_SECONDS = 0.85  # Require longer fixations before penalizing
+        REGRESSION_X_THRESHOLD = -30  
+        LINE_CHANGE_Y_THRESHOLD = 40  
+        FIXATION_RADIUS = 25          
+        LONG_FIXATION_SECONDS = 0.85 
         
-        # 1. Count Regressions
         for i in range(1, len(self.history)):
             dx = self.history[i][1] - self.history[i-1][1]
             dy = self.history[i][2] - self.history[i-1][2]
@@ -49,7 +45,6 @@ class GazeReadingAnalyzer:
             if dx < REGRESSION_X_THRESHOLD and abs(dy) < LINE_CHANGE_Y_THRESHOLD:
                 regressions += 1
 
-        # 2. Detect Prolonged Fixations
         fixation_start_idx = 0
         while fixation_start_idx < len(self.history):
             start_t, start_x, start_y, _ = self.history[fixation_start_idx]
@@ -64,17 +59,16 @@ class GazeReadingAnalyzer:
                 end_idx += 1
                 
             duration = self.history[end_idx-1][0] - start_t
-            if duration > LONG_FIXATION_SECONDS: # Require a longer sustained fixation
+            if duration > LONG_FIXATION_SECONDS: 
                 long_fixations += 1
                 
             fixation_start_idx = end_idx + 1
 
-        # 3. Calculate Struggle Score
+
         regression_penalty = min(1.0, regressions / 4.0)
         fixation_penalty = min(1.0, long_fixations / 3.0)
         struggle_score = max(0.0, min(1.0, (regression_penalty * 0.40) + (fixation_penalty * 0.60)))
         
-        # 4. Determine Reading State
         current_state = self._determine_state(struggle_score, long_fixations, regressions)
 
         return {
@@ -97,11 +91,9 @@ class GazeReadingAnalyzer:
         ys = [h[2] for h in self.history]
         spread_x = max(xs) - min(xs)
         spread_y = max(ys) - min(ys)
-        
-        # NEW: Calculate where on the screen the user is primarily looking
+
         avg_y = sum(ys) / len(ys) if ys else 0
         
-        # --- State Decision Tree ---
         if on_paper_ratio < 0.50:
             return "Thinking (Off-Text)"
             
@@ -117,7 +109,6 @@ class GazeReadingAnalyzer:
             return "Scanning (Upwards)"
             
         if spread_x < 100 and spread_y < 100:
-            # NEW: If looking at the bottom, downgrade to regular reading
             if avg_y > 750: 
                 return "Reading (Focus  ed)"
             return "Deep Focus"

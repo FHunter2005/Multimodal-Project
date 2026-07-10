@@ -1,67 +1,37 @@
-# pdf_context.py
 
-# Dictionary structure: { page_number: { paragraph_index: "Help Text", "fallback": "Page Summary" } }
 PDF_HELP_TEXTS = {
     0: { # Page 1: Introduction
-        1: "This paragraph introduces the core problem: universities are pressured to balance traditional operational efficiency with the UN's 17 Sustainable Development Goals (SDGs)[cite: 1].",
-        2: "Here, the authors highlight a 'methodological schism'[cite: 1]. Traditional efficiency models (like DEA) reward 'doing more with less,' which often conflicts with long-term sustainability goals[cite: 1].",
-        3: "This outlines the paper's method: using simple correlation analysis to compare efficiency data (Sapientia) with sustainability rankings (THE Impact and UI GreenMetric) to find 'cross-drivers'[cite: 1].",
-        4: "The authors explain they will group universities into four clusters (e.g., High Efficiency-High Sustainability) based on their scores, which will guide the qualitative analysis[cite: 1].",
-        "fallback": "This introduction outlines the goal to bridge quantitative efficiency metrics with qualitative sustainability rankings in Italian universities[cite: 1]."
+        1: """This paragraph introduces the core conflict of the paper: universities are under massive pressure to maintain traditional operational efficiency—often measured by financial savings and research throughput—while simultaneously trying to adopt the UN's 17 Sustainable Development Goals (SDGs). The authors argue that these two missions often compete for the same limited resources.""",
+        2: """The authors identify a 'methodological schism' here. Traditional models like Data Envelopment Analysis (DEA) prioritize 'doing more with less' (efficiency), but sustainability often requires 'doing things differently' (quality). By focusing only on efficiency, universities often overlook the hidden costs to sustainability.""",
+        3: """This section outlines the paper's methodological approach: a correlation analysis. Rather than reinventing the wheel, the authors compare established efficiency metrics (Sapientia) against sustainability performance rankings (THE Impact and UI GreenMetric). The goal is to find 'cross-drivers'—factors that improve both operational productivity and sustainability simultaneously.""",
+        4: """This explains the logic behind the authors' clustering strategy. By grouping universities into four distinct quadrants (e.g., High Efficiency-High Sustainability), they shift the analysis from abstract data to actionable policy profiles. This allows them to see which institutional characteristics actually move the needle for sustainability.""",
+        "fallback": "This introduction outlines the central tension: the struggle to bridge quantitative efficiency metrics with qualitative sustainability rankings in Italian universities."
     },
     1: { # Page 2: Literature Review
-        0: "Based on a review of 435 articles, this paragraph shows that current research focuses too much on measurable inputs/outputs and ignores the qualitative drivers of change[cite: 1].",
-        1: "The review concludes that because efficiency and sustainability are measured separately, current rankings give an incomplete picture, treating sustainability merely as a symbolic gesture[cite: 1].",
-        2: "This section introduces the UN 2030 Agenda and its 17 Sustainable Development Goals (SDGs) as the primary framework, noting institutions must move beyond symbolic adoption[cite: 1].",
-        3: "Here, two main rankings are compared: UI GreenMetric focuses on campus environmental operations, while THE Impact Rankings focus on broader societal impacts[cite: 1].",
-        4: "This paragraph explains that sustainability reports ('Bilancio di Sostenibilità') are crucial tools for institutional accountability and organizational change[cite: 1].",
-        5: "In Italy, while universities use standard reporting frameworks, there is still a significant gap in actually adopting dedicated Sustainability Plans[cite: 1].",
-        "fallback": "This page reviews existing literature, noting a disconnect between mathematical efficiency models and actual sustainability integration[cite: 1]."
-    },
-    2: { # Page 3: Data Collection
-        0: "This paragraph explains that the dataset was standardized using 2023 as the baseline year to ensure robust comparative analysis[cite: 1].",
-        1: "The efficiency metrics were sourced from the Sapientia Observatory, which tracks resource inputs and academic outputs[cite: 1].",
-        2: "The dataset was restricted to 29 Italian universities that appeared across all three data sources (Sapientia, UI GreenMetric, and THE Impact Rankings)[cite: 1].",
-        "fallback": "This page details the data collection, specifically focusing on the 29 Italian universities filtered from the Sapientia Observatory[cite: 1]."
-    },
-    3: { # Page 4: THE Impact Data
-        0: "This notes that the THE Impact Rankings use the UN's SDGs as a structural framework, translating them into specific quantifiable institutional indicators[cite: 1].",
-        1: "This references Table 1, which outlines how the THE framework measures specific goals (like poverty, health, and gender equality)[cite: 1].",
-        "fallback": "This page breaks down how the THE Impact Rankings translate UN SDGs into measurable data points[cite: 1]."
-    },
-    4: { # Page 5: GreenMetric & Scraper
-        0: "This notes the UI GreenMetric uses a different methodology designed specifically to measure environmental commitment[cite: 1].",
-        1: "To gather more context, the researchers built an automated Python web-scraper to collect public sustainability information from university websites[cite: 1].",
-        2: "The scraper used a recursive crawling architecture, starting from manual root pages since sustainability info is often scattered across different subdomains[cite: 1].",
-        3: "The crawler was restricted by depth and keyword filters (like 'sustainability', 'SDG', 'climate') to keep the search focused[cite: 1].",
-        4: "It extracted HTML text and used PyMuPDF to extract text from linked PDF documents, like strategic plans and governance reports[cite: 1].",
-        "fallback": "This page explains the UI GreenMetric framework and details the custom Python web-scraper built to analyze university websites[cite: 1]."
+        0: """Based on a meta-analysis of 435 articles, this section reveals a major gap in academia: current research is obsessed with measurable inputs (like budget) and outputs (like citations), but largely ignores the qualitative, behavioral drivers of institutional change. It suggests that most existing papers miss the 'human element' of sustainability.""",
+        1: """The literature review concludes that efficiency and sustainability are currently siloed—they are measured by different agencies using different criteria. The paper argues that current rankings provide an incomplete, almost superficial picture, where sustainability is often treated as a PR 'check-box' exercise rather than an institutional priority.""",
+        2: """This introduces the UN 2030 Agenda (SDGs) as the normative framework. The authors emphasize that institutional adoption of these goals is often purely symbolic. The critical challenge isn't just signing onto the agenda, but integrating it into daily research and teaching practices.""",
+        3: """This section distinguishes between the two ranking frameworks: UI GreenMetric focuses on the 'hardware' of sustainability (campus energy, waste management, transportation), while THE Impact Rankings look at the 'software' (societal impact, research, gender equality). It’s an important distinction for university leadership.""",
+        4: """This highlights the 'Bilancio di Sostenibilità' (Sustainability Report) as the primary tool for accountability. However, the authors note that writing the report is not the same as implementing the strategy—reporting is a diagnostic tool, not the cure itself.""",
+        5: """The review ends on a sobering note for the Italian context: despite having robust reporting frameworks, Italian universities lag behind in actually adopting dedicated Sustainability Plans that dictate long-term budget and policy shifts.""",
+        "fallback": "This page reviews existing literature, noting a deep disconnect between mathematical efficiency models and actual sustainability integration in Italian higher education."
     },
     6: { # Page 7: Quantitative Analysis
-        0: "This section explores how internal efficiency intersects with multidimensional sustainability metrics to identify core drivers[cite: 1].",
-        1: "To fix missing data (NaNs) in the THE rankings, they only used metrics with at least 5 entries and calculated a 'stability score' (mean divided by standard deviation)[cite: 1].",
-        2: "The analysis maps top positive correlations, showing how highly optimized resource management aligns with sustainability[cite: 1].",
-        4: "It highlights that financially robust universities with strong research profiles naturally support sustainable campus integration (SDG 11 and 12)[cite: 1].",
-        5: "Conversely, strong negative correlations reveal institutional trade-offs and operational barriers[cite: 1].",
-        "fallback": "This page analyzes the quantitative data, finding that strong finances often support campus sustainability, while exposing other trade-offs[cite: 1]."
+        0: """This section explores the 'cross-over' points where internal resource efficiency aligns with, or clashes against, multidimensional sustainability metrics. The goal is to identify core 'drivers'—specific university attributes that reliably predict sustainable success across different frameworks.""",
+        1: """To manage the messy reality of data, the authors had to perform 'data cleaning.' They handled missing values (NaNs) by filtering metrics with fewer than 5 entries and calculating a 'stability score'—essentially measuring if a university’s performance is consistent or just a lucky outlier.""",
+        2: """The analysis maps top positive correlations, suggesting that the most optimized, well-managed institutions have a 'virtuous cycle.' When a university is efficient with resource management, it often manages its energy, waste, and campus life better, too.""",
+        4: """This paragraph finds that financially robust universities with strong research profiles have a natural advantage. These institutions have the capital to invest in 'greening' their infrastructure, which makes hitting SDG 11 (Sustainable Cities) and SDG 12 (Responsible Consumption) much easier.""",
+        5: """Conversely, the negative correlations identify the 'structural barriers.' These aren't just administrative failures; they are indicative of institutional trade-offs—sometimes, optimizing for one ranking framework inherently degrades performance in another.""",
+        "fallback": "This analysis identifies that while strong finances often support campus sustainability, there are specific, measurable trade-offs in operational management."
     },
     7: { # Page 8: Negative Correlates & Clusters
-        0: "A major negative finding: intense focus on elite research (like publishing in Nature/Science) and high spending per student severely conflicts with climate action and educational equality goals[cite: 1].",
-        1: "This section uses cross-correlation to find specific factors (drivers) that help or hurt sustainability performance[cite: 1].",
-        2: "The top positive driver is the prevalence of Postgraduate First-Level Master's Degrees[cite: 1].",
-        4: "A negative driver is an older average age of staff, suggesting traditional mindsets or older infrastructure act as barriers to sustainable transitions[cite: 1].",
-        "fallback": "This page highlights negative trade-offs, showing how an over-focus on elite research rankings can hinder broader sustainability goals[cite: 1]."
-    },
-    8: { # Page 9: The Quadrants
-        0: "The data allows universities to be mapped onto a 4-quadrant matrix based on Efficiency and Sustainability scores[cite: 1].",
-        1: "Top-Right (Green): High Efficiency / High Sustainability. These institutions lead in both operational and ESG metrics[cite: 1].",
-        2: "Bottom-Right (Red): High Efficiency / Low Sustainability. Highly productive universities that haven't translated that success into sustainability rankings[cite: 1].",
-        3: "Top-Left (Blue): Low Efficiency / High Sustainability. Institutions that prioritize sustainability despite lower technical efficiency[cite: 1].",
-        4: "Bottom-Left (Grey): Low Efficiency / Low Sustainability. Institutions facing structural challenges in both areas[cite: 1].",
-        "fallback": "This page defines a diagnostic 4-quadrant matrix to categorize universities based on their Efficiency and Sustainability profiles[cite: 1]."
+        0: """This is one of the most critical findings: elite research intensity (e.g., publishing in top-tier journals) and high per-student spending often show an inverse relationship with climate action and educational equality. This suggests that the 'Publish or Perish' culture may inadvertently come at the cost of broader institutional sustainability.""",
+        1: """The authors use cross-correlation here to move beyond simple 'good/bad' labels and isolate the specific variables that drive sustainability up or down, helping universities diagnose their unique problems.""",
+        2: """Interestingly, the strongest positive driver for sustainability is the prevalence of 'Postgraduate First-Level Master's Degrees.' This suggests that universities with strong vocational and advanced training programs are more effectively integrating sustainability into their curriculum.""",
+        4: """The authors point to the 'older average age of staff' as a significant negative driver. This isn't just about age—it represents institutional inertia, where legacy mindsets and older, less efficient physical infrastructure create a 'lock-in' effect that makes sustainable transition harder.""",
+        "fallback": "This page highlights difficult trade-offs: an extreme obsession with elite research rankings can unintentionally hinder progress on broader sustainability goals."
     }
 }
-
 def get_help_text_for_paragraph(page_num, para_idx):
     """
     Retrieves the specific help text for a given page and paragraph index.
@@ -72,6 +42,5 @@ def get_help_text_for_paragraph(page_num, para_idx):
     
     if not page_data:
         return "This section discusses the broader findings of aligning university operational efficiency with qualitative sustainability reporting[cite: 1]."
-        
-    # Attempt to get the exact paragraph, otherwise use the page's fallback
+ 
     return page_data.get(para_idx, page_data.get("fallback"))

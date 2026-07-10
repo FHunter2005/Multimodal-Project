@@ -31,7 +31,7 @@ from pdf_reader import PDFDocument, summarize, draw_dialog
 from dialog_controller import DialogController
 from face_modality import FaceModalityTracker
 from voice_assistant import VoiceAssistant
-
+from pdf_context import get_help_text_for_paragraph
 
 class ReaderHelperApp:
     def __init__(self, pdf_path, zoom, dwell):
@@ -83,7 +83,12 @@ class ReaderHelperApp:
         self.mouse_score = None
         # FUSED Dialog Controller
         self.voice_assistant = VoiceAssistant(enabled=True)
-        self.voice_listener = VoiceListener() # <--- NEW
+      
+        self.voice_listener = VoiceListener()
+        
+        # Start continuous listening immediately
+        self.voice_listener.start_continuous(self._on_voice_heard)
+        self.pending_voice_action = None # Thread-safe flag for the main loop
         self.dialog_controller = DialogController(dwell=dwell, voice_assistant=VoiceAssistant(enabled=False))
         self.max_score = None
         # State tracking
@@ -134,7 +139,42 @@ class ReaderHelperApp:
         horizontal_offset = abs(nose[0] - eye_mid[0])
         vertical_offset = abs(nose[1] - eye_mid[1])
         return horizontal_offset > 0.08 and (abs(nose[0] - 0.5) > 0.05 or vertical_offset > 0.10)
+    def _on_voice_heard(self, text):
+        """Callback from the background STT thread."""
+        
+        # 1. If a system prompt (Y/N) is active, hijack the voice for Yes/No
+        if getattr(self, 'prompt_active', False):
+            if any(w in text for w in ["yes", "yeah", "sure", "yep", "ok", "please"]):
+                self.pending_voice_action = 'ACCEPT_PROMPT'
+            elif any(w in text for w in ["no", "nope", "nah", "stop", "cancel"]):
+                self.pending_voice_action = 'DECLINE_PROMPT'
+            return
 
+        # 2. Continuous Deictic Commands (Gaze + Voice)
+        if ("summarize" in text or "summarise" in text) and ("this" in text or "paragraph" in text or "it" in text):
+            self.pending_voice_action = 'SUMMARIZE_HOVER'
+        elif "explain" in text and "this" in text:
+            self.pending_voice_action = 'SUMMARIZE_HOVER' # Reusing summary for explanation
+
+    def _trigger_deictic_summary(self):
+        """Executes a voice command based on WHERE the user's gaze is currently fixed."""
+        # 1. Check if the user's eyes are currently locked onto a paragraph
+        if self.stable_hov is not None:
+            _, paras = self.pdf.get_page(self.page)
+            
+            # Ensure the paragraph index is valid for the current page
+            if self.stable_hov < len(paras):
+                self.dlg_para = paras[self.stable_hov]
+                self.dlg_active = True
+                
+                # 2. Fetch the specific context text based on page and paragraph index
+                self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, self.stable_hov)
+                
+                # 3. Provide auditory feedback that the system successfully fused gaze + voice
+                self.voice_assistant.speak("Here is the context for the paragraph you are looking at.")
+        else:
+            # If they say "Summarize this" but are looking off-screen or between paragraphs
+            self.voice_assistant.speak("I'm not sure which paragraph you mean. Please look directly at the text and ask again.")
     def _update_face_direction_baseline(self, lm):
         if lm is None:
             return
@@ -327,7 +367,7 @@ class ReaderHelperApp:
                 self.prompt_text = "Take break & summarize? (Y/N)"
                 self.voice_assistant.speak(
                     "It seems like you're quite tired. Let's take a quick break and in the meantime I will create a summary of what you read?",
-                    on_finish=self.voice_listener.listen_async
+                    
                 )
                 self.last_fatigue_spoken_time = current_time
                 self.last_spoken_time = current_time
@@ -425,13 +465,13 @@ class ReaderHelperApp:
                         self.prompt_text = "Summarize the paper? (Y/N)"
                         self.voice_assistant.speak(
                             "Would you like me to summarize the paper for you?", 
-                            on_finish=self.voice_listener.listen_async
+                            
                         )
                     elif finalized_state == "Thinking (Off-Text)":
                         self.prompt_text = "Explain current part? (Y/N)"
                         self.voice_assistant.speak(
                             "Would you like me to explain to you the current part of the paper?", 
-                            on_finish=self.voice_listener.listen_async
+                        
                         )
                     
                     self.prompt_active = True
@@ -932,19 +972,33 @@ class ReaderHelperApp:
                     self.sampling_active = True
                     tx, ty = DRIFT_PTS[self.drift_index]
                     self.gaze_reader.begin_drift_point(tx, ty, self.gaze_reader.DRIFT_SAMPLES)
-        # 2. Handle Voice Commands (NEW)
-        if getattr(self, 'prompt_active', False):
-            voice_cmd = self.voice_listener.get_result()
-            if voice_cmd == 'Y':
+        # --- Process Continuous Voice Commands ---
+        # Check if the background audio thread heard anything and passed us an action
+        if getattr(self, 'pending_voice_action', None) is not None:
+            action = self.pending_voice_action
+            self.pending_voice_action = None # Clear the flag immediately
+            
+            if action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
                 print("[SYSTEM] Voice command accepted prompt.")
                 self._accept_prompt()
-            elif voice_cmd == 'N':
+                
+            elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
                 print("[SYSTEM] Voice command declined prompt.")
                 self._decline_prompt()
-            elif voice_cmd in ['TIMEOUT', 'UNKNOWN']:
-                # Optional: You can let it auto-dismiss or just leave the visual prompt up 
-                # so the user can still press the physical Y/N keys.
-                pass
+                
+            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
+                print("[SYSTEM] Gaze-grounded voice command detected.")
+                self._trigger_deictic_summary()
+        if self.pending_voice_action is not None:
+            action = self.pending_voice_action
+            self.pending_voice_action = None # Clear the flag
+            
+            if action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
+                self._accept_prompt()
+            elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
+                self._decline_prompt()
+            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
+                self._trigger_deictic_summary()
     def cleanup(self):
         print("Cleaning up modules...")
         cv2.setMouseCallback('Reader & Dashboard', lambda *args: None)

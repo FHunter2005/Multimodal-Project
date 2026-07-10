@@ -1,27 +1,11 @@
-"""
-emotion_wheel.py
-================
-Emotion detection from MediaPipe face blendshapes,
-visualised as Plutchik's Wheel of Emotions using OpenCV.
-
-Public API
-----------
-    EmotionDetector   – feeds blendshapes, returns smoothed {emotion: score}
-    PlutchikWheel     – renders the wheel onto a numpy BGR canvas
-    EMOTIONS          – ordered list of the 8 basic emotions
-    EMOTION_COLORS    – BGR palette (matches wheel sectors)
-"""
-
 import cv2
 import numpy as np
 
-# ── Plutchik's 8 basic emotions (clockwise from top) ────────────────────────
 EMOTIONS = [
     "Joy", "Trust", "Fear", "Surprise",
     "Sadness", "Disgust", "Anger", "Anticipation",
 ]
 
-# BGR colour for each emotion sector
 EMOTION_COLORS: dict[str, tuple[int, int, int]] = {
     "Joy":          (  0, 215, 255),   # gold
     "Trust":        ( 80, 160,  80),   # green
@@ -33,9 +17,6 @@ EMOTION_COLORS: dict[str, tuple[int, int, int]] = {
     "Anticipation": (  0, 140, 255),   # orange
 }
 
-# ── Blendshape → emotion contribution weights ────────────────────────────────
-# MediaPipe outputs 52 blendshape coefficients (0–1 each).
-# We take a weighted sum to score each Plutchik emotion.
 _BLENDSHAPE_WEIGHTS: dict[str, dict[str, float]] = {
     "Joy": {
         "mouthSmileLeft":   0.40,
@@ -93,9 +74,7 @@ _BLENDSHAPE_WEIGHTS: dict[str, dict[str, float]] = {
 }
 
 
-# ============================================================
-# EmotionDetector
-# ============================================================
+
 class EmotionDetector:
     """
     Converts MediaPipe face blendshapes to Plutchik emotion scores in [0, 1].
@@ -152,10 +131,6 @@ class EmotionDetector:
         for e in EMOTIONS:
             self.scores[e] = 0.0
 
-
-# ============================================================
-# PlutchikWheel
-# ============================================================
 class PlutchikWheel:
     """
     Draws an animated Plutchik's Wheel on a numpy BGR canvas.

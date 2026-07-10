@@ -1,11 +1,3 @@
-"""
-Unified Multimodal PDF Reader & Dashboard
-====================================================================
-Architecture (HYBRID FUSION TRACKING + PDF READING):
-- Analyzers: Gaze (MediaPipe/ResNet), Emotion (MediaPipe), Epistemic (MediaPipe), Mouse
-- Gaze features: RAW output (No Kalman, no temporal smoothing, no deadzones)
-- PDF features: PyMuPDF rendering, FUSED Multimodal Stuck Detection, Gemini Summarization
-"""
 
 import cv2
 import time
@@ -26,16 +18,13 @@ except ImportError:
     print("[ERROR] pip install pymupdf")
     sys.exit(1)
 
-# Assume these are available in your local environment
+
 from local_epistemic_tracker import LocalEpistemicTracker
 from emotion_wheel import EmotionDetector, PlutchikWheel
 from mouse_analyzer import MouseReadingAnalyzer
 from gaze_analyzer import GazeReadingAnalyzer
 from gaze_core import GazeReader, CALIB_PTS, DRIFT_PTS
 
-# =============================================================
-# 1. CORE CONSTANTS & UI HELPERS
-# =============================================================
 SCREEN_W, SCREEN_H = 1920, 1080
 SANDBOX_W, SANDBOX_H, WHEEL_W, WHEEL_H = 1280, 1080, 640, 540
 
@@ -51,12 +40,7 @@ def draw_target_dot(canvas, tx, ty, progress, label):
     cv2.putText(canvas, label, ((SCREEN_W - 440) // 2, SCREEN_H // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
 
 
-# =============================================================
-# 2. PDF & SUMMARIZATION MODULES
-# =============================================================
-# =============================================================
-# 2. PDF & SUMMARIZATION MODULES
-# =============================================================
+
 class PDFDocument:
     def __init__(self, path, zoom=None):
         self.doc = fitz.open(path)
@@ -82,8 +66,7 @@ class PDFDocument:
             
             lines = b.get("lines", [])
             if not lines: continue
-            
-            # Ignore headers / large titles
+        
             if len(lines) <= 2:
                 avg = np.mean([s.get("size",10) for l in lines for s in l.get("spans",[])] or [10])
                 if avg > 13: continue
@@ -95,25 +78,25 @@ class PDFDocument:
             for line in lines:
                 lx0, ly0, lx1, ly1 = line["bbox"]
                 
-                # Extract text for the current line
+            
                 text = "".join(s["text"] for s in line.get("spans", [])).strip()
                 if not text: continue
                 
-                # Check if this line should start a new paragraph
+           
                 is_new_para = False
                 if prev_bbox is not None:
                     prev_lx0, _, _, prev_ly1 = prev_bbox
                     line_height = ly1 - ly0
                     gap = ly0 - prev_ly1
                     
-                    # 1. Vertical Gap: Is there spacing between this line and the last?
+                
                     if gap > (line_height * 0.4):
                         is_new_para = True
-                    # 2. Indentation: Is this line indented significantly?
+               
                     elif (lx0 - prev_lx0) > (line_height * 1.5):
                         is_new_para = True
                 
-                # If a new paragraph is detected, finalize the previous one and reset
+         
                 if is_new_para and current_para:
                     para_text = " ".join(current_para).strip()
                     if len(para_text) >= 20 and cy0 >= ph * 0.05:
@@ -125,13 +108,12 @@ class PDFDocument:
                     current_para = []
                     cx0, cy0, cx1, cy1 = float('inf'), float('inf'), -float('inf'), -float('inf')
                 
-                # Accumulate the line into the current paragraph hitbox
+  
                 current_para.append(text)
                 cx0, cy0 = min(cx0, lx0), min(cy0, ly0)
                 cx1, cy1 = max(cx1, lx1), max(cy1, ly1)
                 prev_bbox = (lx0, ly0, lx1, ly1)
             
-            # Save the final accumulated paragraph from the block
             if current_para:
                 para_text = " ".join(current_para).strip()
                 if len(para_text) >= 20 and cy0 >= ph * 0.05:
