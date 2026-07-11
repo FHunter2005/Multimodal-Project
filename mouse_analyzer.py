@@ -24,6 +24,58 @@ class MouseReadingAnalyzer:
         if self._listener:
             self._listener.stop()
 
+    def detect_circling_gesture(self, time_window=1.5):
+        """
+        Evaluates recent mouse history to detect a circular/looping gesture.
+        Returns the center (cx, cy) of the circle if detected, else None.
+        """
+        current_time = time.time()
+        # Filter points within the target time window
+        recent_points = [p for p in self.history if current_time - p[0] <= time_window]
+        
+        if len(recent_points) < 15: # Not enough data points to form a circle
+            return None
+            
+        xs = [p[1] for p in recent_points]
+        ys = [p[2] for p in recent_points]
+        
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        # 1. Size constraint: The gesture must be large enough to be deliberate
+        if width < 60 or height < 60:
+            return None
+            
+        # 2. Aspect Ratio: A circle/loop should be somewhat proportional, 
+        # avoiding long horizontal reading sweeps
+        aspect_ratio = width / height if height > 0 else 100
+        if not (0.3 < aspect_ratio < 3.0):
+            return None
+            
+        # 3. Calculate Path Length vs Net Displacement
+        path_length = 0.0
+        for i in range(1, len(recent_points)):
+            dx = recent_points[i][1] - recent_points[i-1][1]
+            dy = recent_points[i][2] - recent_points[i-1][2]
+            path_length += math.sqrt(dx**2 + dy**2)
+            
+        start_pt = recent_points[0]
+        end_pt = recent_points[-1]
+        net_displacement = math.sqrt((end_pt[1] - start_pt[1])**2 + (end_pt[2] - start_pt[2])**2)
+        
+        # 4. Circle Logic: The path length must be significantly larger than 
+        # the net displacement (meaning it looped back on itself)
+        if path_length > 2.5 * max(width, height) and net_displacement < (path_length * 0.4):
+            # Calculate the center of the bounding box
+            center_x = min_x + (width / 2)
+            center_y = min_y + (height / 2)
+            return (int(center_x), int(center_y))
+            
+        return None
+
     def _on_move(self, x, y):
         self.history.append((time.time(), x, y))
 

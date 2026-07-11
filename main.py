@@ -157,24 +157,53 @@ class ReaderHelperApp:
             self.pending_voice_action = 'SUMMARIZE_HOVER' # Reusing summary for explanation
 
     def _trigger_deictic_summary(self):
-        """Executes a voice command based on WHERE the user's gaze is currently fixed."""
-        # 1. Check if the user's eyes are currently locked onto a paragraph
-        if self.stable_hov is not None:
-            _, paras = self.pdf.get_page(self.page)
+        """Executes a voice command based on WHERE the user is pointing or looking."""
+        _, paras = self.pdf.get_page(self.page)
+        target_idx = None
+
+        # 1. EXPLICIT GESTURE: Check if the user just circled something with the mouse
+        circled_center = self.mouse_tracker.detect_circling_gesture(time_window=2.0)
+        
+        if circled_center:
+            cx, cy = circled_center
             
-            # Ensure the paragraph index is valid for the current page
+            # Convert raw screen coordinates to PDF document space
+            pg_img, _ = self.pdf.get_page(self.page)
+            ph, pw = pg_img.shape[:2]
+            ox = max(0, (self.SCREEN_W - pw) // 2)
+            
+            gpx = cx - ox
+            gpy = cy + self.scroll_y # Account for vertical scrolling
+            
+            # Find which paragraph bounding box contains the center of the circle
+            for pi, para in enumerate(paras):
+                bx0, by0, bx1, by1 = para["bbox"]
+                # Apply a margin to account for loose/messy circling around the text
+                margin = 80 
+                if (bx0 - margin <= gpx <= bx1 + margin) and (by0 - margin <= gpy <= by1 + margin):
+                    target_idx = pi
+                    print(f"[SYSTEM] Mouse circle gesture detected at paragraph {pi}")
+                    break
+
+        # 2. PASSIVE GESTURE: Fallback to Gaze if no mouse gesture was detected
+        if target_idx is None and self.stable_hov is not None:
             if self.stable_hov < len(paras):
-                self.dlg_para = paras[self.stable_hov]
-                self.dlg_active = True
-                
-                # 2. Fetch the specific context text based on page and paragraph index
-                self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, self.stable_hov)
-                
-                # 3. Provide auditory feedback that the system successfully fused gaze + voice
-                self.voice_assistant.speak("Here is the context for the paragraph you are looking at.")
+                target_idx = self.stable_hov
+                print(f"[SYSTEM] Gaze fixation utilized at paragraph {target_idx}")
+
+        # 3. Execute Action
+        if target_idx is not None:
+            self.dlg_para = paras[target_idx]
+            self.dlg_active = True
+            
+            # Fetch the specific context text based on page and paragraph index
+            self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
+            
+            # Provide auditory feedback
+            self.voice_assistant.speak("Here is the context for the paragraph you selected.")
         else:
-            # If they say "Summarize this" but are looking off-screen or between paragraphs
-            self.voice_assistant.speak("I'm not sure which paragraph you mean. Please look directly at the text and ask again.")
+            # If neither gaze nor mouse circling found a valid paragraph
+            self.voice_assistant.speak("I'm not sure which paragraph you mean. Please look at or circle the text and ask again.")
     def _update_face_direction_baseline(self, lm):
         if lm is None:
             return
