@@ -187,6 +187,13 @@ class LocalEpistemicTracker:
                 self.active_frames[s] = max(0, self.active_frames[s] - 2)
 
             if s in escalating_states:
+                # Cap accumulated "active" time: without this, sustained
+                # confusion/frustration escalates forever and, since decay
+                # is only -2/frame, can take minutes to unwind even long
+                # after the expression that triggered it is gone.
+                max_active_frames = (self.escalation_t_sec + 6.0) * self.fps
+                self.active_frames[s] = min(self.active_frames[s], max_active_frames)
+
                 frames_past_t = self.active_frames[s] - (self.escalation_t_sec * self.fps)
                 if frames_past_t > 0:
                     bonus = (frames_past_t / self.fps) * self.escalation_rate

@@ -22,6 +22,7 @@ class DialogController:
         self.tip_cooldown = tip_cooldown
         self.last_tip_time = 0.0
         self.voice_assistant = voice_assistant
+        self.active_reason = None
 
         self.off_text_frames = 0
         self.distracted_frames = 0
@@ -188,7 +189,11 @@ class DialogController:
             self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 3.0)
 
         if sustained_same_block and current_para is not None and same_block_stuck_score > 0.30:
-            evidence_pool["Struggling / Stuck"].append(min(1.0, same_block_stuck_score * 1.10))
+            # Cap pure gaze-dwell's contribution: staying on one paragraph for
+            # a while is normal careful reading, not necessarily struggling.
+            # Without a corroborating confusion/frustration signal, this alone
+            # must never be able to peg the state at 1.0 on its own.
+            evidence_pool["Struggling / Stuck"].append(min(0.55, same_block_stuck_score * 0.55))
             evidence_pool["Reading (Focused)"].append(0.04)
             evidence_pool["Deep Focus"].append(0.02)
 
@@ -276,7 +281,11 @@ class DialogController:
         fused_state = new_fused_state
         fused_intensity = new_fused_intensity
 
-        self.last_fixation_block = current_para
+        # Only update when we actually have a paragraph: overwriting this with
+        # None whenever the user looks away destroys the "last known paragraph"
+        # memory that the Distracted/Thinking fallbacks below depend on.
+        if current_para is not None:
+            self.last_fixation_block = current_para
         self.last_gaze_xy = (gaze_x, gaze_y) if gaze_x is not None else self.last_gaze_xy
 
         # ---------------------------------------------------------
@@ -285,7 +294,10 @@ class DialogController:
         if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.struggle_frames = max(0, self.struggle_frames - 10)
         if fused_state == "Struggling / Stuck" or (confusion > 0.4 or frustration > 0.4):
-            self.struggle_frames += 1
+            # Cap growth so recovery time stays bounded once the struggle
+            # signal actually stops, instead of taking longer the longer it
+            # ran (this had no ceiling before, so decay-to-0 could take ages).
+            self.struggle_frames = min(360, self.struggle_frames + 1)
         else:
             self.struggle_frames = max(0, self.struggle_frames - 6)
 
@@ -311,25 +323,37 @@ class DialogController:
         if fused_state == "Distracted" or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.distracted_frames += 1
         else:
-            self.distracted_frames = max(0, self.distracted_frames - 3) # Drain slightly slower to smooth out blinks
+            self.distracted_frames = max(0, self.distracted_frames - 1) # Drain slowly: the wandering signal is noisy frame-to-frame
 
-        TRIGGER_THRESHOLD = 300 
+        TRIGGER_THRESHOLD = 300
+        DISTRACT_TRIGGER_THRESHOLD = 150
         triggered_para = None
         needs_summary = False
         
         # ---------------------------------------------------------
         # 6. PARAGRAPH DWELL LOGIC
         # ---------------------------------------------------------
-        if current_para != self.cur_para:
-            self.cur_para = current_para
-            self.para_t0 = now if current_para is not None else None
+        # While Distracted, current_para is usually None (the user has looked
+        # away from any paragraph). Anchor the dwell timer to the last known
+        # paragraph in that case instead of resetting it every frame, or the
+        # fast consensus-based trigger below can never engage for distraction.
+        if current_para is not None:
+            dwell_para = current_para
+        elif fused_state == "Distracted" and self.last_fixation_block is not None:
+            dwell_para = self.last_fixation_block
+        else:
+            dwell_para = None
+
+        if dwell_para != self.cur_para:
+            self.cur_para = dwell_para
+            self.para_t0 = now if dwell_para is not None else None
             self.para_fv = False
-        elif current_para is not None and not self.para_fv:
-            
+        elif dwell_para is not None and not self.para_fv:
+
             dynamic_dwell = self.dwell * 0.5 if (fused_state == "Struggling / Stuck") else self.dwell
-            
-            if now - self.para_t0 >= dynamic_dwell and now - self.para_fired.get(current_para, 0) >= self.cooldown:
-                self.para_fired[current_para] = now
+
+            if now - self.para_t0 >= dynamic_dwell and now - self.para_fired.get(dwell_para, 0) >= self.cooldown:
+                self.para_fired[dwell_para] = now
                 self.para_fv = True
                 
                 # --- DECISION ENGINE (GATED BY COOLDOWN) ---
@@ -350,12 +374,11 @@ class DialogController:
                         instant_msg = "INTERVENTION: Taking time to process. Let me know if you need help."
                     elif fused_state == "Distracted":
                         instant_need = True
-                        # FIX: Fallback to the last read paragraph if currently looking away
-                        instant_trigger_para = current_para if current_para is not None else getattr(self, 'last_fixation_block', 0)
-                        if instant_trigger_para is None: 
-                            instant_trigger_para = 0
-                        instant_needs_sum = True
-                        instant_msg = "INTERVENTION: Distraction detected. Generating a paragraph summary to help you refocus..."
+                        # Distraction is a nudge, not a content request: don't
+                        # fetch/generate a paragraph summary for it.
+                        instant_trigger_para = None
+                        instant_needs_sum = False
+                        instant_msg = "INTERVENTION: You seem distracted. Try to refocus on the page."
                     elif fused_state == "Struggling / Stuck":
                         instant_need = True
                         instant_trigger_para = current_para
@@ -394,43 +417,49 @@ class DialogController:
         # ---------------------------------------------------------
         # 7. GLOBAL STATE INTERVENTIONS
         # ---------------------------------------------------------
-        # ---------------------------------------------------------
-        # 7. GLOBAL STATE INTERVENTIONS
-        # ---------------------------------------------------------
-        # FIX: Added 'or self.distracted_frames > TRIGGER_THRESHOLD'
-        if (self.struggle_frames > TRIGGER_THRESHOLD or self.distracted_frames > TRIGGER_THRESHOLD) and not self.help_active:
-            if not in_cooldown:
-                self.last_tip_time = now 
-                self.help_active = True
-                # --- NEW: Distraction handling ---
-                if self.distracted_frames > TRIGGER_THRESHOLD:
-                    self.system_message = "INTERVENTION: Distraction detected. Want me to explain the whole paper?"
-                    
-                    # Fallback to the last paragraph read so the prompt knows what context to fetch
-                    triggered_para = current_para if current_para is not None else getattr(self, 'last_fixation_block', 0)
-                    if triggered_para is None: 
-                        triggered_para = 0
-                        
-                    needs_summary = True
-                # ---------------------------------
-                elif fused_state == "Thinking (Off-Text)":
-                    self.help_active = True
-                    self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
+        # Pick whichever condition is dominant *right now* and always reflect
+        # it in the message. Previously this whole block was gated behind
+        # 'not self.help_active', so once one reason fired (e.g. struggling)
+        # its message was frozen until a full reset - a newer, more relevant
+        # reason (e.g. looking away -> distracted) could never take over.
+        if self.distracted_frames > DISTRACT_TRIGGER_THRESHOLD:
+            desired_reason = "distracted"
+        elif fused_state == "Thinking (Off-Text)":
+            desired_reason = "thinking"
+        elif self.struggle_frames > TRIGGER_THRESHOLD:
+            desired_reason = "struggling"
+        else:
+            desired_reason = None
+
+        if desired_reason is not None:
+            reason_just_started = desired_reason != self.active_reason
+            self.help_active = True
+            self.active_reason = desired_reason
+
+            if desired_reason == "distracted":
+                # Distraction is a nudge, not a content request: don't
+                # fetch/generate a paragraph or whole-paper summary for it.
+                self.system_message = "INTERVENTION: You seem distracted. Try to refocus on the page."
+            elif desired_reason == "thinking":
+                self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
+            else:
+                if plutchik_frustration > 0.6:
+                    self.system_message = "INTERVENTION: High Frustration detected. Generating paragraph summary..."
                 else:
-                    # Catch both standard struggling AND high frustration here
+                    self.system_message = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
+
+                # Only (re)generate the paragraph summary once per new
+                # occurrence of struggling, gated by cooldown, so we don't
+                # keep re-requesting it every frame while it stays elevated.
+                if reason_just_started and not in_cooldown:
+                    self.last_tip_time = now
                     triggered_para = current_para
                     needs_summary = True
-                    self.help_active = True
-                    
-                    if plutchik_frustration > 0.6:
-                        self.system_message = "INTERVENTION: High Frustration detected. Generating paragraph summary..."
-                    else:
-                        self.system_message = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
-                
-        elif self.struggle_frames == 0 and self.help_active and not needs_summary:
+        elif self.help_active and not needs_summary:
             self.help_active = False
+            self.active_reason = None
             self.system_message = f"User engaged. Normal reading. ({fused_state.lower()})"
-            self.last_tip_time = now 
+            self.last_tip_time = now
 
        
         
@@ -449,7 +478,10 @@ class DialogController:
 
     def reset_intervention(self):
         self.struggle_frames = 0
+        self.distracted_frames = 0
         self.help_active = False
+        self.active_reason = None
+        self.system_message = "Listening to User State..."
         self.last_tip_time = time.time()
         self.reset_dwell()
         
