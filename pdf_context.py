@@ -1,3 +1,4 @@
+# pdf_context.py
 
 PDF_HELP_TEXTS = {
     0: { # Page 1: Introduction
@@ -32,6 +33,7 @@ PDF_HELP_TEXTS = {
         "fallback": "This page highlights difficult trade-offs: an extreme obsession with elite research rankings can unintentionally hinder progress on broader sustainability goals."
     }
 }
+
 def get_help_text_for_paragraph(page_num, para_idx):
     """
     Retrieves the specific help text for a given page and paragraph index.
@@ -41,6 +43,6 @@ def get_help_text_for_paragraph(page_num, para_idx):
     page_data = PDF_HELP_TEXTS.get(page_num)
     
     if not page_data:
-        return "This section discusses the broader findings of aligning university operational efficiency with qualitative sustainability reporting[cite: 1]."
+        return "This section discusses the broader findings of aligning university operational efficiency with qualitative sustainability reporting."
  
     return page_data.get(para_idx, page_data.get("fallback"))

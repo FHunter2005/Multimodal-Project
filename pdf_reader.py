@@ -158,8 +158,8 @@ def draw_dialog(canvas, dlg_summary):
     cv2.rectangle(canvas, (dx0,dy0),    (dx0+dw,dy0+dh), (25,25,35),    -1)
     cv2.rectangle(canvas, (dx0,dy0),    (dx0+dw,dy0+dh), (100,180,255),  2)
     cv2.rectangle(canvas, (dx0,dy0),    (dx0+dw,dy0+52), (40,40,60),    -1)
-    cv2.putText(canvas, "Looks like you might be stuck on this paragraph.",
-                (dx0+20, dy0+36), cv2.FONT_HERSHEY_DUPLEX, 0.85, (100,210,255), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "Here is an explanation of the paper's context:",
+            (dx0+20, dy0+36), cv2.FONT_HERSHEY_DUPLEX, 0.85, (100,210,255), 1, cv2.LINE_AA)
     cv2.line(canvas, (dx0, dy0+52), (dx0+dw, dy0+52), (100,180,255), 1)
     sumtext = dlg_summary['text']
     if sumtext is None:

@@ -401,39 +401,37 @@ class ReaderHelperApp:
             self.current_gaze_score =  self.current_gaze_data['score']
             self.current_gaze_state = self.current_gaze_data['state'] 
 
-            # 2. Skimming Overrqide
+            # 2. Skimming Override (Unified & Scroll-Dependent)
             if len(self.vertical_gaze_history) >= 15:
                 recent_gaze = list(self.vertical_gaze_history)[-15:]
                 instant_variance = float(np.std(recent_gaze))
                 
-                # --- NEW: Compounding Momentum Logic ---
-                # Safely fetch the current momentum (defaults to 0.0)
+                # --- Compounding Momentum Logic ---
                 current_momentum = getattr(self, 'eye_skimming_momentum', 0.0)
                 
                 if instant_variance > 0.035: # Base threshold for "active" eye movement
-                    # Growth accelerates based on BOTH how wild the eyes are AND how long they've been moving
                     growth_step = (instant_variance * 0.4) + (current_momentum * 0.08)
                     self.eye_skimming_momentum = min(1.0, current_momentum + growth_step)
                 else:
-                    # Decay rapidly (0.15 per frame) when eyes stop so it doesn't get stuck
                     self.eye_skimming_momentum = max(0.0, current_momentum - 0.15)
                     
                 eye_skimming_score = self.eye_skimming_momentum
-                time_since_scroll = time.time() - getattr(self, 'last_scroll_time', 0.0)
-                is_scrolling = time_since_scroll < 1.0
                 
-                if is_scrolling:
-                    final_skimming_score = min(1.0, eye_skimming_score * 1.5 + 0.4)
+                # --- NEW: Periodic Scrolling Requirement ---
+                time_since_scroll = time.time() - getattr(self, 'last_scroll_time', 0.0)
+                is_scrolling_periodically = time_since_scroll < 4.0 # Scrolled within the last 4 seconds
+                
+                if is_scrolling_periodically:
+                    final_skimming_score = min(1.0, eye_skimming_score * 1.5 + 0.3)
                 else:
-                    final_skimming_score = eye_skimming_score
-                # --- ADD THIS NEW CONTINUOUS SCROLL BYPASS ---
-                # If the user has been scrolling non-stop for more than 1.0 second
+                    # Eyes alone are not enough to trigger Skimming; cap the value.
+                    final_skimming_score = min(0.45, eye_skimming_score * 0.4)
+                
+                # --- Continuous Scroll Bypass ---
                 if getattr(self, 'scroll_active_duration', 0.0) > 1.0:
-                    # Creates a score that ramps up quickly the longer they scroll
                     scroll_bypass_score = (self.scroll_active_duration - 1.0) * 1.5 
-                    # Force the score high, even if eye_skimming_score is 0.0
                     final_skimming_score = min(1.0, max(final_skimming_score, 0.5 + scroll_bypass_score))
-                # ---------------------------------------------
+                
                 if final_skimming_score > 0.65:
                     self.current_gaze_state = "Skimming"
 
@@ -462,10 +460,9 @@ class ReaderHelperApp:
                 if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
                     
                     if finalized_state == "Distracted":
-                        self.prompt_text = "Summarize the paper? (Y/N)"
+                        self.prompt_text = "Explain whole paper? (Y/N)"
                         self.voice_assistant.speak(
-                            "Would you like me to summarize the paper for you?", 
-                            
+                            "Would you like me to explain the whole paper to you?"
                         )
                     elif finalized_state == "Thinking (Off-Text)":
                         self.prompt_text = "Explain current part? (Y/N)"
@@ -486,28 +483,7 @@ class ReaderHelperApp:
                 self.last_spoken_state = None
 
         
-            # -------------------------------------------
-            # --- NEW BLENDSHAPE SKIMMING LOGIC ---
-            if len(self.vertical_gaze_history) >= 15:
-                # 1. Standard deviation measures vertical "up and down" movement
-                gaze_variance = float(np.std(self.vertical_gaze_history))
-                
-                # 2. Normalize variance to a 0-1 scale. (0.06 variance is very high movement)
-                eye_skimming_score = min(1.0, gaze_variance / 0.06) 
-                
-                # 3. Increase significantly if user is scrolling
-                time_since_scroll = time.time() - getattr(self, 'last_scroll_time', 0.0)
-                is_scrolling = time_since_scroll < 1.0 # Scrolled in the last 1 second
-                
-                if is_scrolling:
-                    # Boost the score and artificially inflate the base if scrolling
-                    final_skimming_score = min(1.0, eye_skimming_score * 1.5 + 0.4)
-                else:
-                    final_skimming_score = eye_skimming_score
-                    
-                # 4. Override coordinate-based state if skimming is detected
-                if final_skimming_score > 0.65:
-                    self.current_gaze_state = "Skimming"
+          
             if getattr(self, 'head_distraction_score', 0.0) > 0.60:
                 self.current_gaze_state = "Distracted"
                 # Boost the struggle score to match the physical deviation

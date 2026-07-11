@@ -1,6 +1,6 @@
 import time
 import math
-from collections import deque, Counter # <-- Added Counter
+from collections import deque, Counter 
 from pynput import mouse
 
 class MouseReadingAnalyzer:
@@ -13,7 +13,6 @@ class MouseReadingAnalyzer:
         self.smoothed_intensity = 0.0
         self._listener = None
         
-        # NEW: A buffer to hold recent states for majority voting
         self.state_buffer = deque(maxlen=state_buffer_size) 
 
     def start(self):
@@ -29,7 +28,6 @@ class MouseReadingAnalyzer:
         self.history.append((time.time(), x, y))
 
     def _calc_kinematics(self, points):
-        # ... (Keep your existing _calc_kinematics exactly as it is) ...
         if len(points) < 2:
             return 0.0, 0.0, 0.0, 0
             
@@ -67,7 +65,6 @@ class MouseReadingAnalyzer:
         short_cutoff = current_time - self.short_window
         short_history = [p for p in self.history if p[0] >= short_cutoff]
 
-        # Phase 1: Active check
         if len(self.history) > 5:
             long_dist, _, _, _ = self._calc_kinematics(self.history)
             if long_dist > 400:
@@ -80,7 +77,6 @@ class MouseReadingAnalyzer:
         if not self.is_active_reader:
             return {"state": "Inactive", "intensity": 0.0, "score": None}
 
-        # Phase 2: State Prediction (Calculate raw state first)
         raw_state = "Undefined"
         raw_intensity = 0.0
         raw_score = 0.0 
@@ -105,17 +101,15 @@ class MouseReadingAnalyzer:
                     raw_state = "Reading (Focused)"
                     raw_intensity = min(1.0, speed / 300.0)
 
-        # NEW Phase 2.5: Discrete State Smoothing (Majority Vote)
         self.state_buffer.append(raw_state)
-        # Find the most common state in the buffer (e.g., last 30 frames)
+        
         smoothed_state = Counter(self.state_buffer).most_common(1)[0][0]
 
-        # Phase 3: Temporal Smoothing (Intensity)
         alpha = 0.05 
         self.smoothed_intensity = (alpha * raw_intensity) + ((1.0 - alpha) * self.smoothed_intensity)
 
         return {
-            "state": smoothed_state,  # <-- Return the smoothed state, not the raw one
+            "state": smoothed_state,  
             "intensity": self.smoothed_intensity, 
             "score": raw_score if smoothed_state == "Distracted" else 0.0
         }

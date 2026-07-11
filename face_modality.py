@@ -18,7 +18,6 @@ class FaceModalityTracker:
         self.fatigue_window = 60.0     # Track blinks over a rolling 60-second window
         self.is_blinking = False
         self.blink_timestamps = deque()
-        # NEW: Hysteresis thresholds to ignore squinting
         self.blink_enter_thresh = 0.45 # Eyes must close this much to count as a blink
         self.blink_exit_thresh = 0.25  # Eyes must open this much to reset for the next blink
         self.is_calibrating = False
@@ -37,7 +36,6 @@ class FaceModalityTracker:
             with self.landmark_lock:
                 if result.face_blendshapes:
                     self.latest_blendshapes = result.face_blendshapes[0]
-                # --- NEW: Grab landmarks for proximity tracking ---
                 if result.face_landmarks:
                     self.latest_landmarks = result.face_landmarks[0]
                 if result.facial_transformation_matrixes:
@@ -48,7 +46,6 @@ class FaceModalityTracker:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
         self.detector.detect_async(mp_image, timestamp_ms)
 
-    # --- NEW BASELINE METHODS ---
     def start_calibration(self):
         self.is_calibrating = True
         self.calib_start_time = time.time()
@@ -63,7 +60,6 @@ class FaceModalityTracker:
             
             if duration_min > 0:
                 raw_bpm = self.calib_blink_count / duration_min
-                # Floor the baseline at 15 BPM to prevent the "Staring Contest" effect
                 self.baseline_bpm = max(15.0, raw_bpm)
             
             print(f"[SYSTEM] Calibration finished. Baseline BPM set to: {self.baseline_bpm:.1f}")
@@ -71,15 +67,12 @@ class FaceModalityTracker:
     def is_fatigued(self):
         """Returns True if current BPM is statistically higher than baseline."""
         if self.is_calibrating:
-            return False # Never trigger fatigue while calibrating
+            return False
             
         current_bpm = len(self.blink_timestamps)
-        
-        # "Statistically higher" = 50% above baseline AND at least +10 blinks
         fatigue_threshold = max(self.baseline_bpm * 1.5, self.baseline_bpm + 10)
         
         return current_bpm > fatigue_threshold
-    # ----------------------------
 
     def update_state(self):
         process_new_frame = False
@@ -100,19 +93,16 @@ class FaceModalityTracker:
             
             current_time = time.time()
 
-            # Hysteresis Blink Detection
             if eye_closed_score > self.blink_enter_thresh and not self.is_blinking:
                 self.is_blinking = True
                 self.blink_timestamps.append(current_time)
                 
-                # Count blinks specifically for the baseline if calibrating
                 if self.is_calibrating:
                     self.calib_blink_count += 1
                     
             elif eye_closed_score < self.blink_exit_thresh and self.is_blinking:
                 self.is_blinking = False 
 
-            # Prune blinks older than 60 seconds
             while self.blink_timestamps and (current_time - self.blink_timestamps[0] > self.fatigue_window):
                 self.blink_timestamps.popleft()
 

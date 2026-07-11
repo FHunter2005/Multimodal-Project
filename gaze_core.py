@@ -1,10 +1,3 @@
-"""
-gaze_core.py — Reusable gaze estimation module
-===============================================
-RetinaFace + ResNet50 eye crops + PCA/Ridge calibration, wrapped in a
-single GazeReader class your teammates can import and call.
-"""
-
 import cv2, time, numpy as np, threading, sys
 from sklearn.pipeline import make_pipeline
 from sklearn.decomposition import PCA
@@ -20,7 +13,6 @@ except ImportError:
     print("[ERROR] pip install git+https://github.com/Ahmednull/L2CS-Net.git")
     sys.exit(1)
 
-# Default calibration grid: 4 corner anchors + 3×3 dense grid in reading column
 CALIB_PTS = [
     (0.15, 0.15), (0.85, 0.15),
     (0.15, 0.85), (0.85, 0.85),
@@ -35,7 +27,6 @@ DRIFT_PTS = [
 ]
 
 
-# ── Kalman filter ─────────────────────────────────────────────────────────────
 class KalmanGaze:
     def __init__(self, pn=1e-3, mn=3e-2, dt=1/30):
         self.kf = cv2.KalmanFilter(4, 2)
@@ -56,8 +47,6 @@ class KalmanGaze:
 
     def reset(self): self._ok = False
 
-
-# ── Background CNN inference ───────────────────────────────────────────────────
 class _GazeEstimator:
     """
     Internal: runs RetinaFace + ResNet50 eye crops in a background thread.
@@ -145,8 +134,6 @@ class _GazeEstimator:
     def stop(self):
         self._running = False
 
-
-# ── Camera stream ─────────────────────────────────────────────────────────────
 class _WebcamStream:
     def __init__(self, src=0, w=1280, h=720):
         self.cap = cv2.VideoCapture(src)
@@ -166,8 +153,6 @@ class _WebcamStream:
     def read(self): return self.frame
     def stop(self): self.stopped = True; self.cap.release()
 
-
-# ── Public API ────────────────────────────────────────────────────────────────
 class GazeReader:
 
     CAL_SAMPLES   = 20
@@ -184,22 +169,19 @@ class GazeReader:
         self._estimator = None
         self._kalman    = KalmanGaze()
 
-        # Calibration state
+
         self._cal_features : list = []
         self._cal_targets  : list = []
-        self._drift_fixes  : list = []   # (features, target) pairs
+        self._drift_fixes  : list = []  
         self._cal_ok       = False
         self._cal_x = None
         self._cal_y = None
-
-        # Per-point collection buffer
         self._collecting  = False
         self._col_target  = None
         self._col_buf     : list = []
         self._col_n       = self.CAL_SAMPLES
         self._is_drift    = False
 
-        # Current gaze output
         self._gx = screen_w  // 2
         self._gy = screen_h  // 2
         self._features    = None
@@ -207,7 +189,6 @@ class GazeReader:
         self._face_detected = False
         self._last_fid    = -1
 
-    # ── Lifecycle ─────────────────────────────────────────────────
     def start(self, cam_src=None):
         src = cam_src if cam_src is not None else self._cam_src
         self._stream = _WebcamStream(src=src).start()
@@ -230,7 +211,6 @@ class GazeReader:
         self._eye_pts  = eye_pts
         self._features = features if detected else None
 
-        # Update gaze prediction
         if detected and self._cal_ok and features is not None:
             f  = features.reshape(1, -1)
             sx = float(np.clip(self._cal_x.predict(f)[0], 0, 1))
@@ -240,7 +220,6 @@ class GazeReader:
             self._gx = int(np.clip(kx, 0, self.screen_w  - 1))
             self._gy = int(np.clip(ky, 0, self.screen_h - 1))
 
-        # Accumulate calibration / drift samples
         if self._collecting and detected and features is not None:
             self._col_buf.append(features.copy())
 
@@ -248,7 +227,6 @@ class GazeReader:
         if self._estimator: self._estimator.stop()
         if self._stream:    self._stream.stop()
 
-    # ── Gaze output ───────────────────────────────────────────────
     def get_gaze(self):
         """Returns (x_px, y_px) in screen pixels."""
         return self._gx, self._gy
@@ -275,7 +253,6 @@ class GazeReader:
     def face_detected(self):
         return self._face_detected
 
-    # ── Calibration ───────────────────────────────────────────────
     @property
     def is_calibrated(self):
         return self._cal_ok
@@ -339,7 +316,6 @@ class GazeReader:
         self._gy = self.screen_h  // 2
         self._kalman.reset()
 
-    # ── Drift correction ──────────────────────────────────────────
     def begin_drift_point(self, norm_x, norm_y, n_samples=None):
         """Start collecting samples for a drift correction dot."""
         self._col_target  = (norm_x, norm_y)

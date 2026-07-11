@@ -308,10 +308,10 @@ class DialogController:
         else:
             self.off_text_frames = max(0, self.off_text_frames - 1)
 
-        if (gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None):
+        if fused_state == "Distracted" or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.distracted_frames += 1
         else:
-            self.distracted_frames = max(0, self.distracted_frames - 1)
+            self.distracted_frames = max(0, self.distracted_frames - 3) # Drain slightly slower to smooth out blinks
 
         TRIGGER_THRESHOLD = 300 
         triggered_para = None
@@ -348,6 +348,14 @@ class DialogController:
                     elif fused_state == "Thinking (Off-Text)":
                         instant_need = True
                         instant_msg = "INTERVENTION: Taking time to process. Let me know if you need help."
+                    elif fused_state == "Distracted":
+                        instant_need = True
+                        # FIX: Fallback to the last read paragraph if currently looking away
+                        instant_trigger_para = current_para if current_para is not None else getattr(self, 'last_fixation_block', 0)
+                        if instant_trigger_para is None: 
+                            instant_trigger_para = 0
+                        instant_needs_sum = True
+                        instant_msg = "INTERVENTION: Distraction detected. Generating a paragraph summary to help you refocus..."
                     elif fused_state == "Struggling / Stuck":
                         instant_need = True
                         instant_trigger_para = current_para
@@ -386,11 +394,26 @@ class DialogController:
         # ---------------------------------------------------------
         # 7. GLOBAL STATE INTERVENTIONS
         # ---------------------------------------------------------
-        if self.struggle_frames > TRIGGER_THRESHOLD and not self.help_active:
+        # ---------------------------------------------------------
+        # 7. GLOBAL STATE INTERVENTIONS
+        # ---------------------------------------------------------
+        # FIX: Added 'or self.distracted_frames > TRIGGER_THRESHOLD'
+        if (self.struggle_frames > TRIGGER_THRESHOLD or self.distracted_frames > TRIGGER_THRESHOLD) and not self.help_active:
             if not in_cooldown:
                 self.last_tip_time = now 
                 self.help_active = True
-                if fused_state == "Thinking (Off-Text)":
+                # --- NEW: Distraction handling ---
+                if self.distracted_frames > TRIGGER_THRESHOLD:
+                    self.system_message = "INTERVENTION: Distraction detected. Want me to explain the whole paper?"
+                    
+                    # Fallback to the last paragraph read so the prompt knows what context to fetch
+                    triggered_para = current_para if current_para is not None else getattr(self, 'last_fixation_block', 0)
+                    if triggered_para is None: 
+                        triggered_para = 0
+                        
+                    needs_summary = True
+                # ---------------------------------
+                elif fused_state == "Thinking (Off-Text)":
                     self.help_active = True
                     self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
                 else:

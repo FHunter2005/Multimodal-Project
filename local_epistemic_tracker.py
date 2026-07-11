@@ -1,29 +1,8 @@
-"""
-LocalEpistemicTracker v3 — Multi-modal Epistemic State Detector
-================================================================
-Priority: Confusion and Frustration accuracy based on FACS (Facial Action Coding System).
-
-SIGNAL ARCHITECTURE
-===================
-Each state is scored from N independent sub-signals, each normalised
-0→1, then combined with calibrated weights. 
-
-PSYCHOLOGICAL MAPPING (FACS):
-- Confusion: AU1 (Inner Brow Up) + AU2 (Outer Brow Up) + AU4 (Brow Lower/Furrow). 
-             Characterised by the "Quizzical" look: brows pulling in opposing directions or asymmetrically.
-- Frustration: AU4 (Hard Brow Lower) + AU24 (Lip Press) + AU7 (Lid Tightener).
-             Characterised by hard tension without the "questioning" AU1 raise, plus head agitation.
-"""
-
 from collections import deque
 from typing import Optional, Tuple, Any
 import cv2
 import numpy as np
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Temporal helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _lintrend(arr: np.ndarray) -> float:
     n = len(arr)
@@ -35,10 +14,6 @@ def _lintrend(arr: np.ndarray) -> float:
         return 0.0
     return float((x * (arr - arr.mean())).sum() / denom)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Blendshape keys
-# ─────────────────────────────────────────────────────────────────────────────
 
 _BS_KEYS = [
     "browDownLeft",    "browDownRight",
@@ -113,13 +88,7 @@ class _Stats:
     def avg_s(self, *keys) -> float:
         return float(np.mean([self.s(k) for k in keys]))
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main tracker
-# ─────────────────────────────────────────────────────────────────────────────
-
 class LocalEpistemicTracker:
-    # BOREDOM REMOVED
     STATES = ["concentration", "confusion", "frustration"]
 
     _COLORS = {
@@ -131,7 +100,7 @@ class LocalEpistemicTracker:
     def __init__(
         self,
         window_frames: int   = 90,
-        smooth_alpha:  float = 0.03, # Kept low for stability
+        smooth_alpha:  float = 0.03,
         min_frames:    int   = 20,
         fps:           int   = 30,
         escalation_t_sec: float = 3.0,     
@@ -200,12 +169,9 @@ class LocalEpistemicTracker:
         frus  = self._score_frustration(st, n)
         conc  = self._score_concentration(st, n)
 
-        # ── Cross-suppression ──────────────────────────────────────────────
         conc = _clip01(conc - 0.40 * conf)
         conc = _clip01(conc - 0.50 * frus)
-        conf = _clip01(conf - 0.20 * frus) # Heavy frustration suppresses confusion
-
-        # ── Temporal Escalation Logic ──────────────────────────────────────
+        conf = _clip01(conf - 0.20 * frus) 
         base_scores = {
             "confusion": conf,
             "frustration": frus,
@@ -239,8 +205,6 @@ class LocalEpistemicTracker:
         THRESH = 0.30
         self._active_conf_signals = [k for k, v in self.sub_conf.items() if v >= THRESH]
         self._active_frus_signals = [k for k, v in self.sub_frus.items() if v >= THRESH]
-
-    # ── CONFUSION ─────────────────────────────────────────────────────────────
 
     def _score_confusion(self, st: _Stats, n: int) -> float:
         """
@@ -277,8 +241,6 @@ class LocalEpistemicTracker:
         self.sub_conf = {k: v for k, (_, v) in subs.items()}
         return _clip01(sum(w * v for _, (w, v) in subs.items()))
 
-    # ── FRUSTRATION ───────────────────────────────────────────────────────────
-
     def _score_frustration(self, st: _Stats, n: int) -> float:
         """
         FACS MAPPING (AU4, AU7, AU24):
@@ -314,7 +276,7 @@ class LocalEpistemicTracker:
         self.sub_frus = {k: v for k, (_, v) in subs.items()}
         return _clip01(sum(w * v for _, (w, v) in subs.items()))
 
-    # ── CONCENTRATION ─────────────────────────────────────────────────────────
+
 
     def _score_concentration(self, st: _Stats, n: int) -> float:
         raw_furrow   = st.avg_m("browDownLeft", "browDownRight")
@@ -340,13 +302,12 @@ class LocalEpistemicTracker:
         }
         return _clip01(sum(w * v for w, v in subs.values()))
 
-    # ── RENDERING ─────────────────────────────────────────────────────────────
+
 
     def _draw(self, img: np.ndarray) -> None:
         H, W = img.shape[:2]
         img[:] = (16, 16, 20)
 
-        # ── header ────────────────────────────────────────────────────────
         self._t(img, "EPISTEMIC  STATE", (14, 28), 0.62, (170, 170, 170), 1)
 
         valid_n = sum(1 for v in self._buf if v is not None)
@@ -360,7 +321,6 @@ class LocalEpistemicTracker:
         if self._has_pose:
             self._t(img, "● POSE", (W - 68, 46), 0.36, (60, 120, 60))
 
-        # ── dominant badge ────────────────────────────────────────────────
         dom_c = self._COLORS.get(self.dominant_state, (140, 140, 140))
         if self.dominant_conf > 0.12:
             bx, by = 14, 48
@@ -371,7 +331,6 @@ class LocalEpistemicTracker:
             self._t(img, f"{self.dominant_conf:.0%}",
                     (bx + 168, by + 20), 0.52, (175, 175, 175))
 
-        # ── state bars ────────────────────────────────────────────────────
         BX    = 136
         BW    = W - BX - 14
         ROW   = 70
@@ -400,7 +359,6 @@ class LocalEpistemicTracker:
             if len(hist) > 4:
                 self._spark(img, hist, BX, y + 26, BW, 24, col)
 
-        # ── sub-signal panels ─────────────────────────────────────────────
         panel_y = SY + 3 * ROW + 6
         panel_h = H - panel_y - 8
         mid     = W // 2
