@@ -2,9 +2,8 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-from collections import deque # <--- NEW: Used for smoothing the jitter
+from collections import deque 
 
-# 1. Initialize MediaPipe Face Landmarker
 base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
 options = vision.FaceLandmarkerOptions(
     base_options=base_options,
@@ -26,8 +25,6 @@ calibration_state = 0
 tl_cx, tl_cy = 0, 0
 br_cx, br_cy = 0, 0
 
-# --- NEW: Smoothing Setup ---
-# This will remember the last 10 positions to average them out
 SMOOTHING_FRAMES = 10
 history_x = deque(maxlen=SMOOTHING_FRAMES)
 history_y = deque(maxlen=SMOOTHING_FRAMES)
@@ -40,7 +37,6 @@ def get_pupil_center(landmarks, iris_indices):
 
 cap = cv2.VideoCapture(0)
 
-# --- NEW: Force HD Resolution ---
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 print("Webcam opened in HD! Look at the popup window.")
@@ -68,26 +64,22 @@ while cap.isOpened():
             cx, cy = get_pupil_center(landmarks, IRIS_LEFT)
             cv2.circle(image, (cx, cy), 3, (0, 0, 255), -1)
 
-            # --- CALIBRATION LOGIC ---
             if calibration_state == 0:
                 cv2.putText(image, "Look TOP-LEFT and press '1'", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
             elif calibration_state == 1:
                 cv2.putText(image, "Look BOTTOM-RIGHT and press '2'", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
             elif calibration_state == 2:
                 try:
-                    # 1. Calculate raw screen position
+
                     raw_screen_x = int((cx - tl_cx) / (br_cx - tl_cx) * SCREEN_WIDTH)
                     raw_screen_y = int((cy - tl_cy) / (br_cy - tl_cy) * SCREEN_HEIGHT)
                     
-                    # Keep values inside the screen boundaries
                     raw_screen_x = max(0, min(SCREEN_WIDTH, raw_screen_x))
                     raw_screen_y = max(0, min(SCREEN_HEIGHT, raw_screen_y))
 
-                    # 2. Add to history for smoothing
                     history_x.append(raw_screen_x)
                     history_y.append(raw_screen_y)
 
-                    # 3. Calculate the smooth average
                     smooth_x = int(sum(history_x) / len(history_x))
                     smooth_y = int(sum(history_y) / len(history_y))
 
