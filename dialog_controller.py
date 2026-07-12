@@ -223,10 +223,16 @@ class DialogController:
             evidence_pool["Thinking (Off-Text)"].append(0.95 if not gaze_wandering else 0.70)
         if gaze_off_screen and not gaze_wandering:
             evidence_pool["Thinking (Off-Text)"].append(0.65)
-        if gaze_wandering:
-            evidence_pool["Distracted"].append(0.85)
+        # --- MODIFIED: Distraction Logic ---
         if mouse_wandering:
-            evidence_pool["Distracted"].append(0.75)
+            # Mouse wandering is now the HEAVY driver for distraction
+            evidence_pool["Distracted"].append(0.95)
+            
+        if gaze_wandering:
+            # Gaze wandering is often just skimming or scanning. 
+            # We drastically drop its distraction penalty and assume skimming instead.
+            evidence_pool["Distracted"].append(0.05) 
+            evidence_pool["Skimming"].append(0.40)
         if head_turned_away:
             evidence_pool["Distracted"].append(0.25)
 

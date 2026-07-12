@@ -380,22 +380,36 @@ class LocalEpistemicTracker:
     def _sub_panel(self, img, title, subs, x, y, w, h, col):
         if not subs or h < 20:
             return
+            
         cv2.rectangle(img, (x, y), (x + w, y + h), (24, 24, 28), -1)
         cv2.rectangle(img, (x, y), (x + w, y + h), col, 1)
-        self._t(img, title, (x + 4, y + 11), 0.32, col, 1)
+        
+        # Increased title size from 0.32 to 0.45 and adjusted Y placement
+        self._t(img, title, (x + 4, y + 16), 0.45, col, 1)
+        
         n   = len(subs)
-        row = max(1, (h - 16) // n)
+        row = max(1, (h - 22) // n)
+        
         for j, (name, val) in enumerate(subs.items()):
-            ry  = y + 16 + j * row
+            ry  = y + 22 + j * row
             bw  = int((w - 8) * val)
             dim = tuple(max(0, int(c * 0.45)) for c in col)
+            
             cv2.rectangle(img, (x + 4, ry), (x + w - 4, ry + row - 2), (28, 28, 32), -1)
+            
             if bw > 0:
                 cv2.rectangle(img, (x + 4, ry), (x + 4 + bw, ry + row - 2), dim, -1)
+                
             active = val >= 0.30
-            tc = col if active else (70, 70, 70)
-            label = f"{'●' if active else '○'} {name}"
-            self._t(img, label, (x + 6, ry + row - 4), 0.30, tc)
+            
+            # Made inactive text slightly brighter (70->120) so it's readable
+            tc = col if active else (120, 120, 120)
+            
+            # Replaced unsupported Unicode circles with standard ASCII brackets
+            label = f"[{'X' if active else ' '}] {name}"
+            
+            # Increased text size from 0.30 to 0.45 and centered it better
+            self._t(img, label, (x + 6, ry + row - 6), 0.45, tc)
 
     @staticmethod
     def _hint(state: str) -> str:
