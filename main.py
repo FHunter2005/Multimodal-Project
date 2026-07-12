@@ -11,6 +11,7 @@ import cv2
 import time
 import numpy as np
 import threading
+
 import argparse
 import sys
 from collections import deque
@@ -32,6 +33,7 @@ from dialog_controller import DialogController
 from face_modality import FaceModalityTracker
 from voice_assistant import VoiceAssistant
 from pdf_context import get_help_text_for_paragraph
+from tutorial_manager import TutorialManager
 
 class ReaderHelperApp:
     def __init__(self, pdf_path, zoom, dwell):
@@ -70,6 +72,7 @@ class ReaderHelperApp:
         self.baseline_roll = 0.0
         self.head_distraction_score = 0.0
         # Initialize Core Trackers
+        self.tutorial = TutorialManager(self.SCREEN_W, self.SCREEN_H)
         self.gaze_reader = GazeReader(screen_w=SCREEN_W, screen_h=SCREEN_H, cam_src=0).start()
         self.face_tracker = FaceModalityTracker(blink_threshold=BLINK_BLENDSHAPE_THRESHOLD)
         self.prompt_active = False
@@ -142,6 +145,9 @@ class ReaderHelperApp:
     def _on_voice_heard(self, text):
         """Callback from the background STT thread."""
         
+        if getattr(self, 'tutorial', None) and self.tutorial.is_active:
+            self.pending_voice_action = f"TUTORIAL:{text}"
+            return
         # 1. If a system prompt (Y/N) is active, hijack the voice for Yes/No
         if getattr(self, 'prompt_active', False):
             if any(w in text for w in ["yes", "yeah", "sure", "yep", "ok", "please"]):
@@ -609,7 +615,25 @@ class ReaderHelperApp:
             self.system_action = self.dialog_controller.evaluate(
                 self.mouse_score, self.current_gaze_data, epistemic_state, emotion_state, self.stable_hov, physical_cues
             )
+            # 4. EXPLICIT VOICE ASSISTANT LOGIC (Moved here to use the FUSED state)
+            if self.system_action:
+                fused_state = self.system_action.get('fused_state', 'Initializing')
+                current_time = time.time()
+                time_since_last_spoken = current_time - getattr(self, 'last_spoken_time', 0.0)
 
+                if fused_state in ["Distracted", "Thinking (Off-Text)"]:
+                    if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
+
+                        if fused_state == "Distracted":
+                            self.voice_assistant.speak("You seem a bit distracted. Try to refocus on the page.")
+                        elif fused_state == "Thinking (Off-Text)":
+                            self.prompt_text = "Explain current part? (Y/N)"
+                            self.voice_assistant.speak("Would you like me to explain to you the current part of the paper?")
+                            self.prompt_active = True
+
+                        self.last_spoken_state = fused_state
+                        self.last_spoken_time = current_time
+                        self.last_fatigue_spoken_time = current_time
 
 
         # 7. Generate PDF Summaries if needed
@@ -833,7 +857,12 @@ class ReaderHelperApp:
                 cv2.putText(canvas, self.prompt_text, (px + 15, py + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
                 cv2.putText(canvas, "[Y] Yes    [N] No", (px + 15, py + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 255, 100), 2, cv2.LINE_AA)
 
+        # Place this at the very bottom of def _render(self):
+        if getattr(self, 'tutorial', None) and self.tutorial.is_active:
+            canvas = self.tutorial.draw_overlay(canvas)
+            
         cv2.imshow('Reader & Dashboard', canvas)
+
 
     def _mouse_callback(self, event, x, y, flags, param):
         # 1. Handle Scrolling
@@ -951,11 +980,36 @@ class ReaderHelperApp:
         self.dialog_controller.reset_intervention()
 
     def _handle_input(self):
+   
         key = cv2.waitKey(1)
         key_char = key & 0xFF
         
         if key_char == ord('q'): 
             self.running = False
+            return
+
+        # --- 1. Intercept Keyboard for Tutorial ---
+        if self.tutorial.is_active:
+            if key_char == 32:  # 32 is the ASCII code for Spacebar
+                self.tutorial.process_input(32, None)
+                if not self.tutorial.is_active:
+                    self.face_tracker.start_calibration() # Start calibration NOW
+            return # Block all other PDF inputs while tutorial is active
+
+        # --- 2. Process Voice Commands ---
+        if getattr(self, 'pending_voice_action', None) is not None:
+            action = self.pending_voice_action
+            self.pending_voice_action = None 
+            
+            # Catch tutorial voice commands
+            if action.startswith("TUTORIAL:"):
+                text = action.split("TUTORIAL:")[1]
+                self.tutorial.process_input(None, voice_command=text)
+                if not self.tutorial.is_active:
+                    self.face_tracker.start_calibration() # Start calibration NOW
+                return
+            
+            # ... (Keep your existing ACCEPT_PROMPT / DECLINE_PROMPT logic here) ...
         elif key_char == ord('i') and self.gaze_reader.is_calibrated:
             self.inference_mode = not self.inference_mode
             

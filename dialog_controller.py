@@ -233,12 +233,13 @@ class DialogController:
             # We drastically drop its distraction penalty and assume skimming instead.
             evidence_pool["Distracted"].append(0.05) 
             evidence_pool["Skimming"].append(0.40)
-        if head_turned_away:
-            evidence_pool["Distracted"].append(0.25)
-
+        # Only assign Distracted if they are actively looking around. 
+        # Otherwise, if they are staring away, they are Thinking.
         if not face_looking_at_screen and head_turned_away:
-            evidence_pool["Thinking (Off-Text)"].append(0.95)
-            evidence_pool["Distracted"].append(0.70)
+            if gaze_wandering or mouse_wandering:
+                evidence_pool["Distracted"].append(0.95)
+            else:
+                evidence_pool["Thinking (Off-Text)"].append(0.95)
         elif gaze_state in evidence_pool:
             if gaze_state == "Struggling / Stuck" and gaze_struggle_score > 0.65:
                 evidence_pool[gaze_state].append(min(0.35, gaze_struggle_score * 0.35))
