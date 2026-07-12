@@ -754,7 +754,7 @@ class ReaderHelperApp:
 
             # --- 2: Static Voice Command Text ---
             # --- 2: Static Voice Command Text ---
-            cv2.putText(canvas, "Say 'summarize this' if you need a summary right away.", (20, self.SCREEN_H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.80, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(canvas, "Say 'summarize this' if you need a summary right away.", (60, self.SCREEN_H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.80, (0, 0, 0), 2, cv2.LINE_AA)
             # --- 3: Interactive Status Button ---
             btn_cx, btn_cy = self.SCREEN_W - 60, self.SCREEN_H - 60
             btn_r = 25
