@@ -277,7 +277,15 @@ class ReaderHelperApp:
         if len(mouse_history) < 4:
             return False
 
-        points = [(x, y) for _, x, y in mouse_history[-8:]]
+        # Use a time window rather than a fixed count of raw events: at high
+        # mouse poll rates, the last 8 raw points can span only a few
+        # milliseconds and never accumulate enough motion, causing this to
+        # flicker false even during sustained wandering.
+        cutoff = time.time() - 1.5
+        points = [(x, y) for t, x, y in mouse_history if t >= cutoff]
+        if len(points) < 4:
+            return False
+
         total_motion = 0.0
         direction_changes = 0
         prev_dx = prev_dy = None
@@ -487,26 +495,26 @@ class ReaderHelperApp:
             if finalized_state in ["Distracted", "Thinking (Off-Text)"]:
                 # ONLY trigger if no prompt is currently active AND cooldown has passed
                 if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
-                    
+
                     if finalized_state == "Distracted":
-                        self.prompt_text = "Explain whole paper? (Y/N)"
+                        # Distraction is a nudge, not a content request: just
+                        # say it, don't offer a Y/N action or trigger a summary.
                         self.voice_assistant.speak(
-                            "Would you like me to explain the whole paper to you?"
+                            "You seem a bit distracted. Try to refocus on the page."
                         )
                     elif finalized_state == "Thinking (Off-Text)":
                         self.prompt_text = "Explain current part? (Y/N)"
                         self.voice_assistant.speak(
-                            "Would you like me to explain to you the current part of the paper?", 
-                        
+                            "Would you like me to explain to you the current part of the paper?",
+
                         )
-                    
-                    self.prompt_active = True
-    
+                        self.prompt_active = True
+
                     self.last_spoken_state = finalized_state
-                    
+
                     # Sync global cooldowns
                     self.last_spoken_time = current_time
-                    self.last_fatigue_spoken_time = current_time 
+                    self.last_fatigue_spoken_time = current_time
 
             elif finalized_state in ["Reading (Focused)", "Deep Focus", "Skimming", "Scanning (Upwards)"]:
                 self.last_spoken_state = None
@@ -528,58 +536,58 @@ class ReaderHelperApp:
 
                 # Replace your existing 'invalid_for_paragraph' block and subsequent loop with this:
 
-            if invalid_for_paragraph:
-                self.stable_hov = None
-                self.hover_switch_time = time.time()
-                if self.dialog_controller.cur_para is not None:
-                    self.dialog_controller.reset_dwell()
-            elif not self.dlg_active and paras and pw > 0:
-                
-                keep_current = False
-                current_hover = None
-                
-                # 1. Hysteresis Check: If we already have a hovered paragraph, check if we are still in its "sticky" zone
-                if self.stable_hov is not None and self.stable_hov < len(paras):
-                    bx0, by0, bx1, by1 = paras[self.stable_hov]["bbox"]
-                    
-                    # Apply a generous 'sticky' margin to prevent flickering
-                    sticky_margin_x = max(120, (bx1 - bx0) * 0.3) 
-                    sticky_margin_y = 60 
-                    
-                    if (bx0 - sticky_margin_x <= gpx <= bx1 + sticky_margin_x) and \
-                    (by0 - sticky_margin_y <= gpy <= by1 + sticky_margin_y):
-                        current_hover = self.stable_hov
-                        keep_current = True
-
-                # 2. Only search for a new paragraph if we broke out of the sticky zone
-                if not keep_current:
-                    best_idx = None
-                    best_dist = float('inf')
-                    for pi, para in enumerate(paras):
-                        bx0, by0, bx1, by1 = para["bbox"]
-                        x_margin = max(80, (bx1 - bx0) * 0.2)
-                        y_center = (by0 + by1) / 2.0
-                        
-                        # Standard, tighter bounding box for initial selection
-                        if bx0 - x_margin <= gpx <= bx1 + x_margin:
-                            vd = abs(gpy - y_center)
-                            if vd < best_dist:
-                                best_dist = vd
-                                best_idx = pi
-
-                    current_hover = best_idx if best_idx is not None and best_dist < 140 else None
-
-                # 3. Time-gated switching logic (Keep your existing debounce logic)
-                now = time.time()
-                if current_hover is None:
+                if invalid_for_paragraph:
                     self.stable_hov = None
-                    self.hover_switch_time = now
-                elif self.stable_hov is None:
-                    self.stable_hov = current_hover
-                    self.hover_switch_time = now
-                elif current_hover != self.stable_hov and (now - self.hover_switch_time) > 0.15:
-                    self.stable_hov = current_hover
-                    self.hover_switch_time = now
+                    self.hover_switch_time = time.time()
+                    if self.dialog_controller.cur_para is not None:
+                        self.dialog_controller.reset_dwell()
+                elif not self.dlg_active and paras and pw > 0:
+                
+                    keep_current = False
+                    current_hover = None
+                
+                    # 1. Hysteresis Check: If we already have a hovered paragraph, check if we are still in its "sticky" zone
+                    if self.stable_hov is not None and self.stable_hov < len(paras):
+                        bx0, by0, bx1, by1 = paras[self.stable_hov]["bbox"]
+                    
+                        # Apply a generous 'sticky' margin to prevent flickering
+                        sticky_margin_x = max(120, (bx1 - bx0) * 0.3) 
+                        sticky_margin_y = 60 
+                    
+                        if (bx0 - sticky_margin_x <= gpx <= bx1 + sticky_margin_x) and \
+                        (by0 - sticky_margin_y <= gpy <= by1 + sticky_margin_y):
+                            current_hover = self.stable_hov
+                            keep_current = True
+
+                    # 2. Only search for a new paragraph if we broke out of the sticky zone
+                    if not keep_current:
+                        best_idx = None
+                        best_dist = float('inf')
+                        for pi, para in enumerate(paras):
+                            bx0, by0, bx1, by1 = para["bbox"]
+                            x_margin = max(80, (bx1 - bx0) * 0.2)
+                            y_center = (by0 + by1) / 2.0
+                        
+                            # Standard, tighter bounding box for initial selection
+                            if bx0 - x_margin <= gpx <= bx1 + x_margin:
+                                vd = abs(gpy - y_center)
+                                if vd < best_dist:
+                                    best_dist = vd
+                                    best_idx = pi
+
+                        current_hover = best_idx if best_idx is not None and best_dist < 140 else None
+
+                    # 3. Time-gated switching logic (Keep your existing debounce logic)
+                    now = time.time()
+                    if current_hover is None:
+                        self.stable_hov = None
+                        self.hover_switch_time = now
+                    elif self.stable_hov is None:
+                        self.stable_hov = current_hover
+                        self.hover_switch_time = now
+                    elif current_hover != self.stable_hov and (now - self.hover_switch_time) > 0.15:
+                        self.stable_hov = current_hover
+                        self.hover_switch_time = now
 
         if self.gaze_reader.is_calibrated:
     
@@ -644,7 +652,7 @@ class ReaderHelperApp:
                 
                 self._draw_tracking_ui(canvas, self.SCREEN_W, self.SCREEN_H)
                 self._draw_fusion_hud(canvas, self.mouse_score, self.system_action)
-                cv2.putText(canvas, "Press [I] to enter PDF READER MODE", (1320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(canvas, "Press [I] to enter PDF READER MODE", (1320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
         
         # Inference Mode (PDF Reader)
         else:
@@ -681,7 +689,7 @@ class ReaderHelperApp:
             cv2.rectangle(overlay, (dx, dy), (dx + debug_w, dy + debug_h), (0, 255, 100), 2)
             cv2.addWeighted(overlay, 0.85, canvas, 0.15, 0, canvas) # 85% opacity
             
-            cv2.putText(canvas, "DEBUG: TUNNEL STATE", (dx + 15, dy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 100), 2)
+            cv2.putText(canvas, "DEBUG: TUNNEL STATE", (dx + 15, dy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 100), 2, cv2.LINE_AA)
             cv2.line(canvas, (dx, dy + 40), (dx + debug_w, dy + 40), (0, 255, 100), 1)
             
             # Tunnel-specific debug values only
@@ -706,11 +714,11 @@ class ReaderHelperApp:
                 panel_h = 170
                 cv2.rectangle(canvas, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (20, 20, 25), -1)
                 cv2.rectangle(canvas, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 255, 100), 1)
-                cv2.putText(canvas, "STATE INTENSITIES", (panel_x + 12, panel_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
+                cv2.putText(canvas, "STATE INTENSITIES", (panel_x + 12, panel_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1, cv2.LINE_AA)
                 for i, (state, val) in enumerate(state_intensities.items()):
-                    y = panel_y + 46 + i * 18
+                    y = panel_y + 46 + i * 20
                     if y < panel_y + panel_h - 12:
-                        cv2.putText(canvas, f"{state}: {val:.2f}", (panel_x + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
+                        cv2.putText(canvas, f"{state}: {val:.2f}", (panel_x + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
             # Draw text with color coding for booleans
             for i, line in enumerate(lines):
                 color = (200, 200, 200) # Default gray
@@ -719,7 +727,7 @@ class ReaderHelperApp:
                 elif "False" in line: 
                     color = (50, 50, 255) # Red for False
                 
-                cv2.putText(canvas, line, (dx + 15, dy + 70 + (i * 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.putText(canvas, line, (dx + 15, dy + 70 + (i * 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
             # Draw Gaze Cursor
             if not self.dlg_active:
                 cv2.line(canvas, (self.gaze_x - 14, self.gaze_y), (self.gaze_x + 14, self.gaze_y), (0, 255, 180), 1)
@@ -730,7 +738,7 @@ class ReaderHelperApp:
             if self.drift_mode:
                 ddx = int(DRIFT_PTS[self.drift_index][0] * self.SCREEN_W)
                 ddy = int(DRIFT_PTS[self.drift_index][1] * self.SCREEN_H)
-                cv2.putText(canvas, f"Drift ({self.drift_index+1}/{len(DRIFT_PTS)}) - SPACE", (20, self.SCREEN_H-50), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 220, 50), 2)
+                cv2.putText(canvas, f"Drift ({self.drift_index+1}/{len(DRIFT_PTS)}) - SPACE", (20, self.SCREEN_H-50), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 220, 50), 2, cv2.LINE_AA)
                 
                 if self.gaze_reader._is_drift and self.sampling_active:
                     prog = self.gaze_reader.calibration_progress
@@ -750,23 +758,23 @@ class ReaderHelperApp:
                     cv2.circle(canvas, (ddx, ddy), pp, (200, 160, 0), -1)
 
             scroll_pct = int(100 * self.scroll_y / self.max_scroll) if self.max_scroll > 0 else 0
-            cv2.putText(canvas, f"Page {self.page+1}/{self.pdf.n}  [{scroll_pct}%]", (20, self.SCREEN_H-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 120, 120), 1)
-            cv2.putText(canvas, "[I] Dashboard | j/k=scroll n/p=page d=drift r=recal q=quit", (self.SCREEN_W-650, self.SCREEN_H-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+            cv2.putText(canvas, f"Page {self.page+1}/{self.pdf.n}  [{scroll_pct}%]", (20, self.SCREEN_H-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 120, 120), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "[I] Dashboard | j/k=scroll n/p=page d=drift r=recal q=quit", (self.SCREEN_W-650, self.SCREEN_H-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
 
             # --- TOP-LEFT STATE TRACKER ---
             tracker_text = f"STATE TRACKER: {self.current_gaze_state}"
             (tw, th), _ = cv2.getTextSize(tracker_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)
             cv2.rectangle(canvas, (10, 10), (20 + tw + 10, 20 + th + 15), (30, 30, 30), -1)
             cv2.rectangle(canvas, (10, 10), (20 + tw + 10, 20 + th + 15), (0, 255, 255), 1)
-            cv2.putText(canvas, tracker_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(canvas, tracker_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
             # Draw HUD from Multimodal Dashboard (Shifted down to avoid overlapping the tracker)
             if self.system_action and self.system_action['help_active']:
-                cv2.putText(canvas, f"MULTIMODAL SYS: {self.system_action['message']}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 255), 2)
+                cv2.putText(canvas, f"MULTIMODAL SYS: {self.system_action['message']}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 255), 2, cv2.LINE_AA)
             if self.system_action and self.system_action.get('profile', 'Profile is being calibrated'):
-                cv2.putText(canvas, f"USER PROFILE: {self.system_action.get('profile', 'Profile is being calibrated')}", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 255), 2)
+                cv2.putText(canvas, f"USER PROFILE: {self.system_action.get('profile', 'Profile is being calibrated')}", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 255), 2, cv2.LINE_AA)
             if self.face_tracker.is_blinking:
-                cv2.putText(canvas, "BLINK DETECTED", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(canvas, "BLINK DETECTED", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
 
             if self.dlg_active:
                 draw_dialog(canvas, self.dlg_summary)
@@ -782,12 +790,12 @@ class ReaderHelperApp:
                 
                 # Draw borders and header
                 cv2.rectangle(canvas, (px, py), (px + pw, py + ph), (0, 200, 255), 2)
-                cv2.putText(canvas, "SYSTEM ASSISTANT", (px + 15, py + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+                cv2.putText(canvas, "SYSTEM ASSISTANT", (px + 15, py + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
                 cv2.line(canvas, (px, py + 35), (px + pw, py + 35), (0, 200, 255), 1)
                 
                 # Draw the specific prompt and instructions
-                cv2.putText(canvas, self.prompt_text, (px + 15, py + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1)
-                cv2.putText(canvas, "[Y] Yes    [N] No", (px + 15, py + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 255, 100), 2)
+                cv2.putText(canvas, self.prompt_text, (px + 15, py + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(canvas, "[Y] Yes    [N] No", (px + 15, py + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 255, 100), 2, cv2.LINE_AA)
             # ---------------------------------------
 
         cv2.imshow('Reader & Dashboard', canvas)
@@ -838,7 +846,7 @@ class ReaderHelperApp:
             
             text = f"Look at dot ({self.calib_index+1}/{len(CALIB_PTS)}) — press SPACE"
             text_w = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)[0][0]
-            cv2.putText(canvas, text, ((w - text_w) // 2, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 2)
+            cv2.putText(canvas, text, ((w - text_w) // 2, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 2, cv2.LINE_AA)
         
         for i, (px, py) in enumerate(CALIB_PTS):
             cv2.circle(canvas, (int(px * w), int(py * h)), 8 if i < self.calib_index else 5 if i == self.calib_index else 6, (0, 200, 0) if i < self.calib_index else (255, 255, 255) if i == self.calib_index else (80, 80, 80), -1)
@@ -849,18 +857,18 @@ class ReaderHelperApp:
         cv2.line(canvas, (self.gaze_x, self.gaze_y - 14), (self.gaze_x, self.gaze_y + 14), (255, 255, 255), 1)
         cv2.circle(canvas, (self.gaze_x, self.gaze_y), 4, (255, 255, 255), -1)
         
-        cv2.putText(canvas, "Tracking Base — 'r' recalibrate  'q' quit", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(canvas, "Tracking Base — 'r' recalibrate  'q' quit", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
         
         status_text = f"RAW Gaze Output: X({self.gaze_x}) Y({self.gaze_y}) | State: {self.current_gaze_state}"
         if self.face_tracker.is_blinking: status_text += " [BLINKING]"
-        cv2.putText(canvas, status_text, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255) if self.face_tracker.is_blinking else (200,200,200), 1)
+        cv2.putText(canvas, status_text, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255) if self.face_tracker.is_blinking else (200,200,200), 1, cv2.LINE_AA)
 
     def _draw_fusion_hud(self, canvas, mouse_score, action_state):
         hud_x, hud_y = 30, self.SANDBOX_H - 120
         cv2.rectangle(canvas, (hud_x - 10, hud_y - 40), (hud_x + 550, hud_y + 100), (40, 40, 40), -1)
         
         color = (0, 100, 255) if action_state["help_active"] else (255, 255, 255)
-        cv2.putText(canvas, f"SYSTEM: {action_state['message']}", (hud_x, hud_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(canvas, f"SYSTEM: {action_state['message']}", (hud_x, hud_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
         
         # Check if mouse_score is a valid dictionary and extract the intensity
         if isinstance(mouse_score, dict):
@@ -870,15 +878,16 @@ class ReaderHelperApp:
         else:
             mouse_text = "Mouse PAR Score: INACTIVE"
             mouse_color = (100, 100, 100)
-        cv2.putText(canvas, mouse_text, (hud_x, hud_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouse_color, 1)
-        cv2.putText(canvas, f"Fusion Struggle Level: {action_state['struggle_level']:.2f}", (hud_x, hud_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        cv2.putText(canvas, mouse_text, (hud_x, hud_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouse_color, 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"Fusion Struggle Level: {action_state['struggle_level']:.2f}", (hud_x, hud_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
 
     def _accept_prompt(self):
         self.prompt_active = False
+        self.dialog_controller.reset_intervention()
         _, paras = self.pdf.get_page(self.page)
         if paras:
             self.dlg_active = True
-            
+
             # 1. Check if we saved a specific struggling paragraph
             if getattr(self, 'pending_help_para_idx', None) is not None:
                 target_idx = self.pending_help_para_idx
@@ -886,14 +895,15 @@ class ReaderHelperApp:
             else:
                 # Fallback to the hovered paragraph if it was a different prompt (like fatigue)
                 target_idx = self.stable_hov if self.stable_hov is not None else 0
-                
+
             self.dlg_para = paras[target_idx] if target_idx < len(paras) else paras[0]
-            
+
             # --- ATOMIC CONTEXT LOOKUP ---
             self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
 
     def _decline_prompt(self):
         self.prompt_active = False
+        self.dialog_controller.reset_intervention()
 
     def _handle_input(self):
         key = cv2.waitKey(1)
@@ -909,34 +919,11 @@ class ReaderHelperApp:
             self.dlg_active = False; self.dlg_para = None
         elif key_char in (ord('n'), ord('N')) and self.dlg_active:
             self.dlg_active = False; self.dlg_para = None; self.dlg_summary['text'] = None
-        # --- NEW: Prompt Inputs (Bottom Right Window) ---
-        # --- NEW: Prompt Inputs (Bottom Right Window) ---
-        # --- NEW: Prompt Inputs (Bottom Right Window) ---
+        # --- Prompt Inputs (Bottom Right Window) ---
         elif key_char in (ord('y'), ord('Y')) and getattr(self, 'prompt_active', False):
-            self.prompt_active = False
-            
-            _, paras = self.pdf.get_page(self.page)
-            if paras:
-                self.dlg_active = True
-                
-                # 1. Check if we saved a specific struggling paragraph
-                if getattr(self, 'pending_help_para_idx', None) is not None:
-                    target_idx = self.pending_help_para_idx
-                    self.pending_help_para_idx = None # Clear it after using
-                else:
-                    # Fallback to the hovered paragraph if it was a different prompt (like fatigue)
-                    target_idx = self.stable_hov if self.stable_hov is not None else 0
-                    
-                self.dlg_para = paras[target_idx] if target_idx < len(paras) else paras[0]
-                
-                # --- ATOMIC CONTEXT LOOKUP ---
-                self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
-                # Spawn the Gemini thread
-               # def _summ(text, box): box['text'] = summarize(text)
-               # threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
-        
+            self._accept_prompt()
         elif key_char in (ord('n'), ord('N')) and getattr(self, 'prompt_active', False):
-            self.prompt_active = False
+            self._decline_prompt()
         # Reading Inputs
         elif not self.dlg_active:
             if key_char == ord('j'):
