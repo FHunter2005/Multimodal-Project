@@ -863,8 +863,16 @@ class ReaderHelperApp:
             
         cv2.imshow('Reader & Dashboard', canvas)
 
-
     def _mouse_callback(self, event, x, y, flags, param):
+        # --- NEW: Intercept clicks for the Tutorial ---
+        if getattr(self, 'tutorial', None) and self.tutorial.is_active:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                if self.tutorial.handle_click(x, y):
+                    # If clicking "Next" finished the tutorial, start calibration immediately
+                    if not self.tutorial.is_active:
+                        self.face_tracker.start_calibration()
+            return # Block all PDF/System mouse interactions while tutorial is active
+
         # 1. Handle Scrolling
         if event == cv2.EVENT_MOUSEWHEEL and self.inference_mode and not self.dlg_active:
             self.last_scroll_time = time.time() 
