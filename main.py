@@ -988,7 +988,6 @@ class ReaderHelperApp:
         self.dialog_controller.reset_intervention()
 
     def _handle_input(self):
-   
         key = cv2.waitKey(1)
         key_char = key & 0xFF
         
@@ -996,55 +995,81 @@ class ReaderHelperApp:
             self.running = False
             return
 
-        # --- 1. Intercept Keyboard for Tutorial ---
+        # =================================================================
+        # 1. PROCESS VOICE COMMANDS FIRST (So the tutorial doesn't block it)
+        # =================================================================
+        if getattr(self, 'pending_voice_action', None) is not None:
+            action = self.pending_voice_action
+            self.pending_voice_action = None # Clear the flag immediately
+            
+            if action.startswith("TUTORIAL:"):
+                text = action.split("TUTORIAL:")[1]
+                if self.tutorial.is_active:
+                    self.tutorial.process_input(None, voice_command=text)
+                    if not self.tutorial.is_active:
+                        self.face_tracker.start_calibration() # Start calibration NOW
+            
+            elif action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
+                print("[SYSTEM] Voice command accepted prompt.")
+                self._accept_prompt()
+                
+            elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
+                print("[SYSTEM] Voice command declined prompt.")
+                self._decline_prompt()
+                
+            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
+                print("[SYSTEM] Gaze-grounded voice command detected.")
+                self._trigger_deictic_summary()
+
+        # =================================================================
+        # 2. INTERCEPT KEYBOARD FOR TUTORIAL
+        # =================================================================
         if self.tutorial.is_active:
             if key_char == 32:  # 32 is the ASCII code for Spacebar
                 self.tutorial.process_input(32, None)
                 if not self.tutorial.is_active:
-                    self.face_tracker.start_calibration() # Start calibration NOW
-            return # Block all other PDF inputs while tutorial is active
+                    self.face_tracker.start_calibration()
+            return # Block all standard PDF keyboard inputs while tutorial is active
 
-        # --- 2. Process Voice Commands ---
-        if getattr(self, 'pending_voice_action', None) is not None:
-            action = self.pending_voice_action
-            self.pending_voice_action = None 
-            
-            # Catch tutorial voice commands
-            if action.startswith("TUTORIAL:"):
-                text = action.split("TUTORIAL:")[1]
-                self.tutorial.process_input(None, voice_command=text)
-                if not self.tutorial.is_active:
-                    self.face_tracker.start_calibration() # Start calibration NOW
-                return
-            
-            # ... (Keep your existing ACCEPT_PROMPT / DECLINE_PROMPT logic here) ...
-        elif key_char == ord('i') and self.gaze_reader.is_calibrated:
+        # =================================================================
+        # 3. STANDARD KEYBOARD INPUTS
+        # =================================================================
+        if key_char == ord('i') and self.gaze_reader.is_calibrated:
             self.inference_mode = not self.inference_mode
             
         # Dialog Inputs
         elif key_char in (ord('y'), ord('Y')) and self.dlg_active: 
-            self.dlg_active = False; self.dlg_para = None
+            self.dlg_active = False
+            self.dlg_para = None
         elif key_char in (ord('n'), ord('N')) and self.dlg_active:
-            self.dlg_active = False; self.dlg_para = None; self.dlg_summary['text'] = None
-        # --- Prompt Inputs (Bottom Right Window) ---
+            self.dlg_active = False
+            self.dlg_para = None
+            self.dlg_summary['text'] = None
+            
+        # Prompt Inputs (Bottom Right Window)
         elif key_char in (ord('y'), ord('Y')) and getattr(self, 'prompt_active', False):
             self._accept_prompt()
         elif key_char in (ord('n'), ord('N')) and getattr(self, 'prompt_active', False):
             self._decline_prompt()
+            
         # Reading Inputs
         elif not self.dlg_active:
             if key_char == ord('j'):
                 self.scroll_y = min(self.max_scroll, self.scroll_y + SCROLL_STEP)
-                self.last_scroll_time = time.time() # <-- ADD THIS
+                self.last_scroll_time = time.time()
             elif key_char == ord('k'):
                 self.scroll_y = max(0, self.scroll_y - SCROLL_STEP)
-                self.last_scroll_time = time.time() # <-- ADD THIS
+                self.last_scroll_time = time.time()
             elif key_char == ord('n') and self.inference_mode:
                 self.page = min(self.page + 1, self.pdf.n - 1)
-                self.scroll_y = 0; self.dialog_controller.reset_dwell(); self.hov_buf.clear()
+                self.scroll_y = 0
+                self.dialog_controller.reset_dwell()
+                self.hov_buf.clear()
             elif key_char == ord('p') and self.inference_mode:
                 self.page = max(self.page - 1, 0)
-                self.scroll_y = 0; self.dialog_controller.reset_dwell(); self.hov_buf.clear()
+                self.scroll_y = 0
+                self.dialog_controller.reset_dwell()
+                self.hov_buf.clear()
             
             # Calibration / Drift Inputs
             elif key_char == ord('r'):
@@ -1056,7 +1081,8 @@ class ReaderHelperApp:
                 self.gaze_x, self.gaze_y = self.SCREEN_W//2, self.SCREEN_H//2
                 self.gaze_reader.reset_calibration()
                 self.heatmap.reset()
-                self.dialog_controller.reset_dwell(); self.hov_buf.clear()
+                self.dialog_controller.reset_dwell()
+                self.hov_buf.clear()
             elif key_char == ord('d') and self.gaze_reader.is_calibrated and self.inference_mode and not self.drift_mode:
                 self.drift_mode = True
                 self.drift_index = 0
@@ -1071,33 +1097,8 @@ class ReaderHelperApp:
                     self.sampling_active = True
                     tx, ty = DRIFT_PTS[self.drift_index]
                     self.gaze_reader.begin_drift_point(tx, ty, self.gaze_reader.DRIFT_SAMPLES)
-        # --- Process Continuous Voice Commands ---
-        # Check if the background audio thread heard anything and passed us an action
-        if getattr(self, 'pending_voice_action', None) is not None:
-            action = self.pending_voice_action
-            self.pending_voice_action = None # Clear the flag immediately
-            
-            if action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
-                print("[SYSTEM] Voice command accepted prompt.")
-                self._accept_prompt()
-                
-            elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
-                print("[SYSTEM] Voice command declined prompt.")
-                self._decline_prompt()
-                
-            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
-                print("[SYSTEM] Gaze-grounded voice command detected.")
-                self._trigger_deictic_summary()
-        if self.pending_voice_action is not None:
-            action = self.pending_voice_action
-            self.pending_voice_action = None # Clear the flag
-            
-            if action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
-                self._accept_prompt()
-            elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
-                self._decline_prompt()
-            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
-                self._trigger_deictic_summary()
+
+                    
     def cleanup(self):
         print("Cleaning up modules...")
         cv2.setMouseCallback('Reader & Dashboard', lambda *args: None)
