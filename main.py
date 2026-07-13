@@ -148,6 +148,7 @@ class ReaderHelperApp:
         if getattr(self, 'tutorial', None) and self.tutorial.is_active:
             self.pending_voice_action = f"TUTORIAL:{text}"
             return
+            
         # 1. If a system prompt (Y/N) is active, hijack the voice for Yes/No
         if getattr(self, 'prompt_active', False):
             if any(w in text for w in ["yes", "yeah", "sure", "yep", "ok", "please"]):
@@ -158,9 +159,10 @@ class ReaderHelperApp:
 
         # 2. Continuous Deictic Commands (Gaze + Voice)
         if ("summarize" in text or "summarise" in text) and ("this" in text or "paragraph" in text or "it" in text):
-            self.pending_voice_action = 'SUMMARIZE_HOVER'
+            # INSTEAD OF SUMMARIZE_HOVER, ask for confirmation
+            self.pending_voice_action = 'ASK_CONFIRM_SUMMARY'
         elif "explain" in text and "this" in text:
-            self.pending_voice_action = 'SUMMARIZE_HOVER' # Reusing summary for explanation
+            self.pending_voice_action = 'ASK_CONFIRM_SUMMARY'
 
     def _trigger_deictic_summary(self):
         """Executes a voice command based on WHERE the user is pointing or looking."""
@@ -1007,29 +1009,44 @@ class ReaderHelperApp:
                 if self.tutorial.is_active:
                     self.tutorial.process_input(None, voice_command=text)
                     if not self.tutorial.is_active:
-                        self.face_tracker.start_calibration() # Start calibration NOW
+                        self.face_tracker.start_calibration() 
             
+            # --- NEW: Trigger the Confirmation Prompt ---
+            elif action == 'ASK_CONFIRM_SUMMARY':
+                print("[SYSTEM] Asking for summary confirmation...")
+                self.prompt_active = True
+                self.prompt_reason = 'VOICE_COMMAND_SUMMARY' # Remember why we prompted
+                self.prompt_text = "Summarize this paragraph? (Y/N)"
+                self.voice_assistant.speak("Did you want me to summarize this paragraph?")
+                
             elif action == 'ACCEPT_PROMPT' and getattr(self, 'prompt_active', False):
                 print("[SYSTEM] Voice command accepted prompt.")
-                self._accept_prompt()
+                if getattr(self, 'prompt_reason', None) == 'VOICE_COMMAND_SUMMARY':
+                    self.prompt_active = False
+                    self.prompt_reason = None
+                    self._trigger_deictic_summary() # Execute the actual summary
+                else:
+                    self._accept_prompt() # Execute normal system interventions
                 
             elif action == 'DECLINE_PROMPT' and getattr(self, 'prompt_active', False):
                 print("[SYSTEM] Voice command declined prompt.")
-                self._decline_prompt()
-                
-            elif action == 'SUMMARIZE_HOVER' and not getattr(self, 'prompt_active', False):
-                print("[SYSTEM] Gaze-grounded voice command detected.")
-                self._trigger_deictic_summary()
+                if getattr(self, 'prompt_reason', None) == 'VOICE_COMMAND_SUMMARY':
+                    self.prompt_active = False
+                    self.prompt_reason = None
+                    self.voice_assistant.speak("Okay, skipping.")
+                else:
+                    self._decline_prompt()
 
         # =================================================================
         # 2. INTERCEPT KEYBOARD FOR TUTORIAL
+        # ... (Keep your existing tutorial keyboard code here) ...
         # =================================================================
         if self.tutorial.is_active:
-            if key_char == 32:  # 32 is the ASCII code for Spacebar
+            if key_char == 32:  
                 self.tutorial.process_input(32, None)
                 if not self.tutorial.is_active:
                     self.face_tracker.start_calibration()
-            return # Block all standard PDF keyboard inputs while tutorial is active
+            return 
 
         # =================================================================
         # 3. STANDARD KEYBOARD INPUTS
@@ -1046,11 +1063,23 @@ class ReaderHelperApp:
             self.dlg_para = None
             self.dlg_summary['text'] = None
             
-        # Prompt Inputs (Bottom Right Window)
+        # --- Prompt Inputs (Bottom Right Window) ---
         elif key_char in (ord('y'), ord('Y')) and getattr(self, 'prompt_active', False):
-            self._accept_prompt()
+            if getattr(self, 'prompt_reason', None) == 'VOICE_COMMAND_SUMMARY':
+                self.prompt_active = False
+                self.prompt_reason = None
+                self._trigger_deictic_summary()
+            else:
+                self._accept_prompt()
+                
         elif key_char in (ord('n'), ord('N')) and getattr(self, 'prompt_active', False):
-            self._decline_prompt()
+            if getattr(self, 'prompt_reason', None) == 'VOICE_COMMAND_SUMMARY':
+                self.prompt_active = False
+                self.prompt_reason = None
+            else:
+                self._decline_prompt()
+                
+        # ... (Keep the rest of your keyboard logic for scrolling/calibration down here) ...
             
         # Reading Inputs
         elif not self.dlg_active:
