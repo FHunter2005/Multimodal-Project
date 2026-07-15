@@ -114,9 +114,6 @@ class DialogController:
         gaze_wandering = bool(physical_cues.get('gaze_wandering', False))
         mouse_wandering = bool(physical_cues.get('mouse_wandering', False))
 
-        # ---------------------------------------------------------
-        # 2. CALIBRATION PHASE (Observation Only)
-        # ---------------------------------------------------------
         if self.is_calibrating:
             if now - self.start_time < self.calibration_duration:
                 self.calib_mouse_intensities.append(mouse_intensity)
@@ -137,9 +134,6 @@ class DialogController:
 
         self._update_dynamic_profile(mouse_intensity)
 
-        # ---------------------------------------------------------
-        # 3. EVIDENCE ACCUMULATION (Profile-Aware Fusion)
-        # ---------------------------------------------------------
         evidence_pool = {
             "Reading (Focused)": [],
             "Skimming": [],
@@ -151,8 +145,6 @@ class DialogController:
         
         if epistemic_struggle > 0.30:
             evidence_pool["Struggling / Stuck"].append(min(1.0, epistemic_struggle * 1.5))
-        # --- INTEGRATE EPISTEMIC STATES ---
-        # High confusion or frustration is a direct vote for "Struggling / Stuck"
         if confusion > 0.35:
             evidence_pool["Struggling / Stuck"].append(min(1.0, confusion * 1.2))
         if plutchik_frustration > 0.40:
@@ -189,10 +181,6 @@ class DialogController:
             self.same_block_fixation_frames = max(0.0, self.same_block_fixation_frames - 3.0)
 
         if sustained_same_block and current_para is not None and same_block_stuck_score > 0.30:
-            # Cap pure gaze-dwell's contribution: staying on one paragraph for
-            # a while is normal careful reading, not necessarily struggling.
-            # Without a corroborating confusion/frustration signal, this alone
-            # must never be able to peg the state at 1.0 on its own.
             evidence_pool["Struggling / Stuck"].append(min(0.55, same_block_stuck_score * 0.55))
             evidence_pool["Reading (Focused)"].append(0.04)
             evidence_pool["Deep Focus"].append(0.02)
@@ -223,9 +211,6 @@ class DialogController:
             evidence_pool["Thinking (Off-Text)"].append(0.95 if not gaze_wandering else 0.70)
         if gaze_off_screen and not gaze_wandering:
             evidence_pool["Thinking (Off-Text)"].append(0.65)
-        # --- MODIFIED: Distraction Logic ---
-        # --- MODIFIED: Distraction Logic ---
-        # 1. Mouse is the primary, deliberate driver of distraction
         if mouse_wandering:
             evidence_pool["Distracted"].append(0.95)
             
@@ -289,22 +274,13 @@ class DialogController:
         fused_state = new_fused_state
         fused_intensity = new_fused_intensity
 
-        # Only update when we actually have a paragraph: overwriting this with
-        # None whenever the user looks away destroys the "last known paragraph"
-        # memory that the Distracted/Thinking fallbacks below depend on.
         if current_para is not None:
             self.last_fixation_block = current_para
         self.last_gaze_xy = (gaze_x, gaze_y) if gaze_x is not None else self.last_gaze_xy
 
-        # ---------------------------------------------------------
-        # 5. TEMPORAL THRESHOLDING
-        # ---------------------------------------------------------
         if (not face_looking_at_screen and (gaze_off_screen or current_para is None)) or ((gaze_wandering or mouse_wandering) and (gaze_off_screen or current_para is None)):
             self.struggle_frames = max(0, self.struggle_frames - 10)
         if fused_state == "Struggling / Stuck" or (confusion > 0.4 or frustration > 0.4):
-            # Cap growth so recovery time stays bounded once the struggle
-            # signal actually stops, instead of taking longer the longer it
-            # ran (this had no ceiling before, so decay-to-0 could take ages).
             self.struggle_frames = min(360, self.struggle_frames + 1)
         else:
             self.struggle_frames = max(0, self.struggle_frames - 6)
@@ -338,13 +314,6 @@ class DialogController:
         triggered_para = None
         needs_summary = False
         
-        # ---------------------------------------------------------
-        # 6. PARAGRAPH DWELL LOGIC
-        # ---------------------------------------------------------
-        # While Distracted, current_para is usually None (the user has looked
-        # away from any paragraph). Anchor the dwell timer to the last known
-        # paragraph in that case instead of resetting it every frame, or the
-        # fast consensus-based trigger below can never engage for distraction.
         if current_para is not None:
             dwell_para = current_para
         elif fused_state == "Distracted" and self.last_fixation_block is not None:
@@ -364,9 +333,7 @@ class DialogController:
                 self.para_fired[dwell_para] = now
                 self.para_fv = True
                 
-                # --- DECISION ENGINE (GATED BY COOLDOWN) ---
-                # Replace your existing "DECISION ENGINE (GATED BY COOLDOWN)" block with this:
-
+                
                 if not in_cooldown:
                     # 1. Determine instantaneous intervention need for THIS frame
                     instant_need = False
@@ -422,14 +389,6 @@ class DialogController:
                         
                         # Flush the buffer after a successful trigger to prevent double-firing
                         self.intervention_buffer.clear()
-        # ---------------------------------------------------------
-        # 7. GLOBAL STATE INTERVENTIONS
-        # ---------------------------------------------------------
-        # Pick whichever condition is dominant *right now* and always reflect
-        # it in the message. Previously this whole block was gated behind
-        # 'not self.help_active', so once one reason fired (e.g. struggling)
-        # its message was frozen until a full reset - a newer, more relevant
-        # reason (e.g. looking away -> distracted) could never take over.
         if self.distracted_frames > DISTRACT_TRIGGER_THRESHOLD:
             desired_reason = "distracted"
         elif fused_state == "Thinking (Off-Text)":
@@ -445,8 +404,6 @@ class DialogController:
             self.active_reason = desired_reason
 
             if desired_reason == "distracted":
-                # Distraction is a nudge, not a content request: don't
-                # fetch/generate a paragraph or whole-paper summary for it.
                 self.system_message = "INTERVENTION: You seem distracted. Try to refocus on the page."
             elif desired_reason == "thinking":
                 self.system_message = "INTERVENTION: Taking time to process. Let me know if you need help."
@@ -456,9 +413,6 @@ class DialogController:
                 else:
                     self.system_message = "INTERVENTION: Cognitive load detected. Generating paragraph summary..."
 
-                # Only (re)generate the paragraph summary once per new
-                # occurrence of struggling, gated by cooldown, so we don't
-                # keep re-requesting it every frame while it stays elevated.
                 if reason_just_started and not in_cooldown:
                     self.last_tip_time = now
                     triggered_para = current_para
