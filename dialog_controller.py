@@ -2,7 +2,7 @@ import time
 from collections import deque
 
 class DialogController:
-    def __init__(self, dwell=5.0, cooldown=20.0, calibration_duration=5.0, tip_cooldown=30.0, voice_assistant=None):
+    def __init__(self, dwell=5.0, cooldown=5.0, calibration_duration=5.0, tip_cooldown=5.0, voice_assistant=None):
         self.struggle_frames = 0
         self.help_active = False
         self.system_message = "Listening to User State..."
@@ -224,19 +224,20 @@ class DialogController:
         if gaze_off_screen and not gaze_wandering:
             evidence_pool["Thinking (Off-Text)"].append(0.65)
         # --- MODIFIED: Distraction Logic ---
+        # --- MODIFIED: Distraction Logic ---
+        # 1. Mouse is the primary, deliberate driver of distraction
         if mouse_wandering:
-            # Mouse wandering is now the HEAVY driver for distraction
             evidence_pool["Distracted"].append(0.95)
             
-        if gaze_wandering:
-            # Gaze wandering is often just skimming or scanning. 
-            # We drastically drop its distraction penalty and assume skimming instead.
+        # 2. Gaze wandering ONLY counts if the user is actively looking at the screen
+        if gaze_wandering and face_looking_at_screen:
             evidence_pool["Distracted"].append(0.05) 
             evidence_pool["Skimming"].append(0.40)
-        # Only assign Distracted if they are actively looking around. 
-        # Otherwise, if they are staring away, they are Thinking.
+            
+        # 3. If turned away, it is Thinking. Ignore gaze noise entirely.
         if not face_looking_at_screen and head_turned_away:
-            if gaze_wandering or mouse_wandering:
+            # Only erratic mouse usage can break a "Thinking" state into "Distracted"
+            if mouse_wandering:
                 evidence_pool["Distracted"].append(0.95)
             else:
                 evidence_pool["Thinking (Off-Text)"].append(0.95)

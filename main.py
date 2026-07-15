@@ -489,8 +489,9 @@ class ReaderHelperApp:
                 self.head_away_frames = max(0, getattr(self, 'head_away_frames', 0) - 2)
 
             # [TIME USER: LOOKING AWAY]
+            # [TIME USER: LOOKING AWAY]
             if getattr(self, 'head_away_frames', 0) > 200:
-                self.current_gaze_state = "Distracted"
+                self.current_gaze_state = "Thinking (Off-Text)" # Changed from "Distracted"
                 self.current_gaze_score = max(self.current_gaze_score, self.head_distraction_score)
 
             # 4. EXPLICIT VOICE ASSISTANT LOGIC (Moved to evaluate finalized state)
@@ -530,7 +531,7 @@ class ReaderHelperApp:
         
           
             if getattr(self, 'head_distraction_score', 0.0) > 0.60:
-                self.current_gaze_state = "Distracted"
+                self.current_gaze_state = "Thinking (Off-Text)" # Changed from "Distracted"
                 # Boost the struggle score to match the physical deviation
                 self.current_gaze_score = max(self.current_gaze_score, self.head_distraction_score)
             # 4. Collision detection (Hover state)
