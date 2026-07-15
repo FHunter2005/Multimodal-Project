@@ -1,11 +1,3 @@
-"""
-Unified Multimodal PDF Reader & Dashboard
-====================================================================
-Architecture (HYBRID FUSION TRACKING + PDF READING):
-- Analyzers: Gaze (MediaPipe/ResNet), Emotion (MediaPipe), Epistemic (MediaPipe), Mouse
-- Gaze features: RAW output (No Kalman, no temporal smoothing, no deadzones)
-- PDF features: PyMuPDF rendering, FUSED Multimodal Stuck Detection, Gemini Summarization
-"""
 
 import cv2
 import time
@@ -17,14 +9,14 @@ import sys
 from collections import deque
 from pathlib import Path
 from pdf_context import get_help_text_for_paragraph
-# External Modalities (Assumed existing)
+
 from local_epistemic_tracker import LocalEpistemicTracker
 from emotion_wheel import EmotionDetector, PlutchikWheel
 from mouse_analyzer import MouseReadingAnalyzer
 from gaze_analyzer import GazeReadingAnalyzer
 from gaze_core import GazeReader, CALIB_PTS, DRIFT_PTS
 from voice_listener import VoiceListener
-# Newly Modularized Files
+
 from ui_components import (SCREEN_W, SCREEN_H, SANDBOX_W, SANDBOX_H, WHEEL_W, WHEEL_H,
                            SAMPLES_NEEDED, BLINK_BLENDSHAPE_THRESHOLD, SCROLL_STEP,
                            draw_target_dot, GazeHeatmap)
@@ -41,7 +33,6 @@ class ReaderHelperApp:
         self.SANDBOX_W, self.SANDBOX_H = SANDBOX_W, SANDBOX_H
         self.WHEEL_W, self.WHEEL_H = WHEEL_W, WHEEL_H
         
-        # Initialize PDF Document
         self.pdf = PDFDocument(pdf_path, zoom)
         self.page = 0 
         self.scroll_y = 0
@@ -54,7 +45,7 @@ class ReaderHelperApp:
         self.recent_eye_openness = deque(maxlen=10)
         self.dlg_active = False
         self.dlg_para = None
-        self.vertical_gaze_history = deque(maxlen=45) # ~1.5 seconds of blendshape frames
+        self.vertical_gaze_history = deque(maxlen=45)
         self.last_scroll_time = 0.0
         self.dlg_summary = {'text': None}
         
@@ -71,7 +62,7 @@ class ReaderHelperApp:
         self.baseline_pitch = 0.0
         self.baseline_roll = 0.0
         self.head_distraction_score = 0.0
-        # Initialize Core Trackers
+     
         self.tutorial = TutorialManager(self.SCREEN_W, self.SCREEN_H)
         self.gaze_reader = GazeReader(screen_w=SCREEN_W, screen_h=SCREEN_H, cam_src=0).start()
         self.face_tracker = FaceModalityTracker(blink_threshold=BLINK_BLENDSHAPE_THRESHOLD)
@@ -84,17 +75,17 @@ class ReaderHelperApp:
         self.mouse_tracker = MouseReadingAnalyzer()
         self.gaze_tracker = GazeReadingAnalyzer(window_size=5.0)
         self.mouse_score = None
-        # FUSED Dialog Controller
+ 
         self.voice_assistant = VoiceAssistant(enabled=True)
       
         self.voice_listener = VoiceListener()
         
-        # Start continuous listening immediately
+
         self.voice_listener.start_continuous(self._on_voice_heard)
-        self.pending_voice_action = None # Thread-safe flag for the main loop
+        self.pending_voice_action = None
         self.dialog_controller = DialogController(dwell=dwell, voice_assistant=VoiceAssistant(enabled=False))
         self.max_score = None
-        # State tracking
+   
         self.inference_mode = True
         self.current_gaze_score = 0.0
         self.current_gaze_state = "Initializing"
@@ -107,7 +98,6 @@ class ReaderHelperApp:
         self.drift_mode = False
         self.drift_index = 0
 
-        # Unfiltered Raw Coordinate tracking
         self.gaze_x, self.gaze_y = self.SCREEN_W // 2, self.SCREEN_H // 2
         self.system_action = None
         self.face_tracker.start_calibration()
@@ -148,8 +138,7 @@ class ReaderHelperApp:
         if getattr(self, 'tutorial', None) and self.tutorial.is_active:
             self.pending_voice_action = f"TUTORIAL:{text}"
             return
-            
-        # 1. If a system prompt (Y/N) is active, hijack the voice for Yes/No
+
         if getattr(self, 'prompt_active', False):
             if any(w in text for w in ["yes", "yeah", "sure", "yep", "ok", "please"]):
                 self.pending_voice_action = 'ACCEPT_PROMPT'
@@ -157,7 +146,7 @@ class ReaderHelperApp:
                 self.pending_voice_action = 'DECLINE_PROMPT'
             return
 
-        # 2. Continuous Deictic Commands (Gaze + Voice)
+       
         if ("summarize" in text or "summarise" in text) and ("this" in text or "paragraph" in text or "it" in text):
             # INSTEAD OF SUMMARIZE_HOVER, ask for confirmation
             self.pending_voice_action = 'ASK_CONFIRM_SUMMARY'
@@ -165,52 +154,50 @@ class ReaderHelperApp:
             self.pending_voice_action = 'ASK_CONFIRM_SUMMARY'
 
     def _trigger_deictic_summary(self):
-        """Executes a voice command based on WHERE the user is pointing or looking."""
+
         _, paras = self.pdf.get_page(self.page)
         target_idx = None
 
-        # 1. EXPLICIT GESTURE: Check if the user just circled something with the mouse
+     
         circled_center = self.mouse_tracker.detect_circling_gesture(time_window=2.0)
         
         if circled_center:
             cx, cy = circled_center
             
-            # Convert raw screen coordinates to PDF document space
+           
             pg_img, _ = self.pdf.get_page(self.page)
             ph, pw = pg_img.shape[:2]
             ox = max(0, (self.SCREEN_W - pw) // 2)
             
             gpx = cx - ox
-            gpy = cy + self.scroll_y # Account for vertical scrolling
-            
-            # Find which paragraph bounding box contains the center of the circle
+            gpy = cy + self.scroll_y 
+    
             for pi, para in enumerate(paras):
                 bx0, by0, bx1, by1 = para["bbox"]
-                # Apply a margin to account for loose/messy circling around the text
+               
                 margin = 80 
                 if (bx0 - margin <= gpx <= bx1 + margin) and (by0 - margin <= gpy <= by1 + margin):
                     target_idx = pi
                     print(f"[SYSTEM] Mouse circle gesture detected at paragraph {pi}")
                     break
 
-        # 2. PASSIVE GESTURE: Fallback to Gaze if no mouse gesture was detected
         if target_idx is None and self.stable_hov is not None:
             if self.stable_hov < len(paras):
                 target_idx = self.stable_hov
                 print(f"[SYSTEM] Gaze fixation utilized at paragraph {target_idx}")
 
-        # 3. Execute Action
+    
         if target_idx is not None:
             self.dlg_para = paras[target_idx]
             self.dlg_active = True
             
-            # Fetch the specific context text based on page and paragraph index
+            
             self.dlg_summary['text'] = get_help_text_for_paragraph(self.page, target_idx)
             
-            # Provide auditory feedback
+           
             self.voice_assistant.speak("Here is the context for the paragraph you selected.")
         else:
-            # If neither gaze nor mouse circling found a valid paragraph
+          
             self.voice_assistant.speak("I'm not sure which paragraph you mean. Please look at or circle the text and ask again.")
     def _update_face_direction_baseline(self, lm):
         if lm is None:
@@ -285,10 +272,7 @@ class ReaderHelperApp:
         if len(mouse_history) < 4:
             return False
 
-        # Use a time window rather than a fixed count of raw events: at high
-        # mouse poll rates, the last 8 raw points can span only a few
-        # milliseconds and never accumulate enough motion, causing this to
-        # flicker false even during sustained wandering.
+
         cutoff = time.time() - 1.5
         points = [(x, y) for t, x, y in mouse_history if t >= cutoff]
         if len(points) < 4:
@@ -326,78 +310,68 @@ class ReaderHelperApp:
         dt = now - getattr(self, 'last_fuse_time', now)
         self.last_fuse_time = now
         
-        # If a scroll happened less than 250ms ago, consider the scroll "continuous"
+
         if now - getattr(self, 'last_scroll_time', 0.0) < 0.25:
             self.scroll_active_duration = getattr(self, 'scroll_active_duration', 0.0) + dt
         else:
             self.scroll_active_duration = 0.0
-        # 1. Ask FaceModalityTracker for the latest data (now including the matrix)
+       
         process_new_frame, bs, lm, matrix = self.face_tracker.update_state()
         if process_new_frame and bs:
-            # 1. Extract vertical eye look directions
+
             bs_dict = {b.category_name: b.score for b in bs}
             down = (bs_dict.get('eyeLookDownLeft', 0.0) + bs_dict.get('eyeLookDownRight', 0.0)) / 2.0
             up = (bs_dict.get('eyeLookUpLeft', 0.0) + bs_dict.get('eyeLookUpRight', 0.0)) / 2.0
             
-            # 2. Append the vertical gaze proxy
+          
             self.vertical_gaze_history.append(down - up)
-        # --- RESTORED VARIABLES ---
-        # Process Modalities (update emotions/mouse regardless of matrix)
+     
         self.mouse_score = self.mouse_tracker.get_data()
         emotion_state = self.emotion_detector.update(bs) if (process_new_frame and bs) else self.emotion_detector.scores
-        # --------------------------
+       
         if self.gaze_reader.is_calibrated and not getattr(self, 'baseline_finished', False):
             self.face_tracker.stop_calibration()
             self.baseline_finished = True
         if process_new_frame:
-            # 2. Extract true 3D head rotation
+ 
             yaw, pitch, roll = 0.0, 0.0, 0.0
             if matrix is not None:
-                # Extract the top-left 3x3 rotation matrix from the 4x4 transform matrix
                 rmat = matrix[:3, :3] 
                 euler_angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
                 pitch, yaw, roll = euler_angles
             if not self.gaze_reader.is_calibrated and self.sampling_active:
                 self.calib_pose_samples.append((yaw, pitch, roll))
-            # Compute the baseline exact center immediately after calibration ends
+      
             elif self.gaze_reader.is_calibrated and self.calib_pose_samples:
                 self.baseline_yaw = sum(p[0] for p in self.calib_pose_samples) / len(self.calib_pose_samples)
                 self.baseline_pitch = sum(p[1] for p in self.calib_pose_samples) / len(self.calib_pose_samples)
                 self.baseline_roll = sum(p[2] for p in self.calib_pose_samples) / len(self.calib_pose_samples)
-                self.calib_pose_samples.clear() # Clear so this only runs once
+                self.calib_pose_samples.clear() 
 
-            # Compute deviation from the user's personalized baseline
+        
             if self.gaze_reader.is_calibrated:
                 delta_yaw = abs(yaw - self.baseline_yaw)
                 delta_pitch = abs(pitch - self.baseline_pitch)
                 delta_roll = abs(roll - self.baseline_roll)
                 
-                # Flag if they look entirely away
+               
                 self.head_turned_away = delta_yaw > 15.0 or delta_pitch > 18.0 or delta_roll > 15.0
                 self.face_looking_at_screen = not self.head_turned_away
                 
-                # Create a 0.0 -> 1.0 distraction score. 
-                # (Allows 10 degrees of natural wiggle room before penalizing)
+ 
                 max_dev = max(delta_yaw, delta_pitch, delta_roll)
                 self.head_distraction_score = min(1.0, max(0.0, (max_dev - 10.0) / 10.0))
             else:
                 self.head_turned_away = abs(yaw) > 15.0 or abs(pitch) > 20.0
                 self.face_looking_at_screen = not self.head_turned_away
-            # -------------------------------------
-
-            # 4. Feed the pose data to your Epistemic Tracker!
+           
             face_scale = getattr(self, 'debug_face_width', 0.5)
             if bs: 
                 self.epistemic_tracker.update(bs, head_pose=(yaw, pitch, roll, face_scale))
-            # 3. Replace your old 2D coordinate distance math with true 3D angles
-          
-
-        # Fetch the state unconditionally so it doesn't wipe on intermediate frames
+      
         epistemic_state = getattr(self.epistemic_tracker, 'current_state', {}) 
             
-        # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
-  
-        # --- MODIFIED: Fatigue tracking and new Voice Assistant trigger ---
+   
         if self.face_tracker.is_fatigued(): 
             self.dialog_controller.system_message = "INTERVENTION: High Fatigue Detected. Consider a screen break."
             self.dialog_controller.help_active = True
@@ -416,12 +390,8 @@ class ReaderHelperApp:
                 )
                 self.last_fatigue_spoken_time = current_time
                 self.last_spoken_time = current_time
-        # ----------------------------------------------------------------
-        # ----------------------------------------------------------------
-        # ----------------------------------------------------------------
-            
-        # ... (Keep your existing RAW Gaze Data and Collision Detection code here) ...
-        # 3. Process RAW Gaze Data
+   
+
         self.stable_hov = None
         if self.gaze_reader.is_calibrated:
             raw_norm_x, raw_norm_y = self.gaze_reader.get_gaze_norm()
@@ -438,7 +408,7 @@ class ReaderHelperApp:
             on_paper = (0 <= gpx <= pw) and (0 <= gpy <= ph)
 
             self.current_gaze_data = self.gaze_tracker.process_point(self.gaze_x, self.gaze_y, on_paper)
-            # 1. Base State Mapping
+          
             self.current_gaze_data.update({
                 "x": self.gaze_x,
                 "y": self.gaze_y,
@@ -446,12 +416,12 @@ class ReaderHelperApp:
             self.current_gaze_score =  self.current_gaze_data['score']
             self.current_gaze_state = self.current_gaze_data['state'] 
 
-            # 2. Skimming Override (Unified & Scroll-Dependent)
+          
             if len(self.vertical_gaze_history) >= 15:
                 recent_gaze = list(self.vertical_gaze_history)[-15:]
                 instant_variance = float(np.std(recent_gaze))
                 
-                # --- Compounding Momentum Logic ---
+              
                 current_momentum = getattr(self, 'eye_skimming_momentum', 0.0)
                 
                 if instant_variance > 0.035: # Base threshold for "active" eye movement
@@ -462,17 +432,14 @@ class ReaderHelperApp:
                     
                 eye_skimming_score = self.eye_skimming_momentum
                 
-                # --- NEW: Periodic Scrolling Requirement ---
                 time_since_scroll = time.time() - getattr(self, 'last_scroll_time', 0.0)
                 is_scrolling_periodically = time_since_scroll < 4.0 # Scrolled within the last 4 seconds
                 
                 if is_scrolling_periodically:
                     final_skimming_score = min(1.0, eye_skimming_score * 1.5 + 0.3)
                 else:
-                    # Eyes alone are not enough to trigger Skimming; cap the value.
                     final_skimming_score = min(0.45, eye_skimming_score * 0.4)
                 
-                # --- Continuous Scroll Bypass ---
                 if getattr(self, 'scroll_active_duration', 0.0) > 1.0:
                     scroll_bypass_score = (self.scroll_active_duration - 1.0) * 1.5 
                     final_skimming_score = min(1.0, max(final_skimming_score, 0.5 + scroll_bypass_score))
@@ -480,25 +447,18 @@ class ReaderHelperApp:
                 if final_skimming_score > 0.65:
                     self.current_gaze_state = "Skimming"
 
-            # 3. Head Posture Distraction Override
-            # 3. Head Posture Distraction Override (BUFFERED)
-            # Increment a counter if they look away, decay it quickly if they look back
             if getattr(self, 'head_distraction_score', 0.0) > 0.60:
                 self.head_away_frames = getattr(self, 'head_away_frames', 0) + 1
             else:
                 self.head_away_frames = max(0, getattr(self, 'head_away_frames', 0) - 2)
 
-            # [TIME USER: LOOKING AWAY]
-            # [TIME USER: LOOKING AWAY]
             if getattr(self, 'head_away_frames', 0) > 200:
                 self.current_gaze_state = "Thinking (Off-Text)" # Changed from "Distracted"
                 self.current_gaze_score = max(self.current_gaze_score, self.head_distraction_score)
 
-            # 4. EXPLICIT VOICE ASSISTANT LOGIC (Moved to evaluate finalized state)
             current_time = time.time()
             finalized_state = self.current_gaze_state
 
-            # Calculate strict cooldown (default to 45 seconds)
             time_since_last_spoken = current_time - getattr(self, 'last_spoken_time', 0.0)
 
             if finalized_state in ["Distracted", "Thinking (Off-Text)"]:
@@ -506,8 +466,6 @@ class ReaderHelperApp:
                 if not getattr(self, 'prompt_active', False) and time_since_last_spoken > 45.0:
 
                     if finalized_state == "Distracted":
-                        # Distraction is a nudge, not a content request: just
-                        # say it, don't offer a Y/N action or trigger a summary.
                         self.voice_assistant.speak(
                             "You seem a bit distracted. Try to refocus on the page."
                         )
@@ -543,8 +501,7 @@ class ReaderHelperApp:
                     )
                 )
 
-                # Replace your existing 'invalid_for_paragraph' block and subsequent loop with this:
-
+               
                 if invalid_for_paragraph:
                     self.stable_hov = None
                     self.hover_switch_time = time.time()
@@ -639,10 +596,6 @@ class ReaderHelperApp:
                         self.last_fatigue_spoken_time = current_time
 
 
-        # 7. Generate PDF Summaries if needed
-        # Safely check system_action (it might be None during calibration)
-        # 7. Generate PDF Summaries if needed
-        # 7. Generate PDF Summaries if needed
         triggered_para_idx = self.system_action.get("triggered_para") if self.system_action else None
         needs_summary = self.system_action.get("needs_summary", False) if self.system_action else False
         
@@ -656,15 +609,10 @@ class ReaderHelperApp:
               
                 # 2. Save the exact paragraph index they were struggling on
                 self.pending_help_para_idx = triggered_para_idx
-                
-               # def _summ(text, box): box['text'] = summarize(text)
                # threading.Thread(target=_summ, args=(self.dlg_para["text"], self.dlg_summary), daemon=True).start()
     def _render(self):
         canvas = np.zeros((self.SCREEN_H, self.SCREEN_W, 3), dtype=np.uint8)
 
-        # -------------------------------------------------------------
-        # DASHBOARD / DEBUG MODE (Activated by pressing 'I')
-        # -------------------------------------------------------------
         if not self.gaze_reader.is_calibrated or not self.inference_mode:
             if not self.gaze_reader.is_calibrated:
                 canvas[:] = 18
@@ -684,11 +632,6 @@ class ReaderHelperApp:
                 self._draw_fusion_hud(canvas, self.mouse_score, self.system_action)
                 cv2.putText(canvas, "Press [I] to return to PDF READER", (1320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
 
-                # =========================================================
-                # MIGRATED DEBUG PANELS (Only visible here now)
-                # =========================================================
-                
-                # 2. MID-LEFT DEBUG WINDOW (FUSED STATE)
                 debug_w = 360
                 debug_h = 140 
                 dx = 20
@@ -714,7 +657,6 @@ class ReaderHelperApp:
                     color = (200, 200, 200)
                     cv2.putText(canvas, line, (dx + 15, dy + 70 + (i * 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
-                # 3. TOP-RIGHT STATE INTENSITIES (Bounded inside Sandbox to avoid overlapping Right Panels)
                 if self.system_action:
                     state_intensities = self.dialog_controller.smoothed_intensities
                     panel_w = 330
@@ -770,7 +712,6 @@ class ReaderHelperApp:
                     if sy1 > 0 and sy0 < self.SCREEN_H:
                         cv2.rectangle(canvas, (ox+bx0, int(sy0)), (ox+bx1, int(sy1)), (255, 220, 50), 2)
 
-            # --- 1: Subtle Live Tracking Indicator ---
             is_tracking = getattr(self.gaze_reader, 'face_detected', True)
             track_color = (0, 220, 50) if is_tracking else (50, 50, 220)
             track_text = "AI Assistant Active" if is_tracking else "Face Lost - Waiting..."
@@ -779,10 +720,7 @@ class ReaderHelperApp:
             cv2.circle(canvas, (self.SCREEN_W - 200, 35), pulse_r, track_color, -1)
             cv2.putText(canvas, track_text, (self.SCREEN_W - 185, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1, cv2.LINE_AA)
 
-            # --- 2: Static Voice Command Text ---
-            # --- 2: Static Voice Command Text ---
             cv2.putText(canvas, "Say 'summarize this' if you need a summary right away.", (60, self.SCREEN_H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.80, (0, 0, 0), 2, cv2.LINE_AA)
-            # --- 3: Interactive Status Button ---
             btn_cx, btn_cy = self.SCREEN_W - 60, self.SCREEN_H - 60
             btn_r = 25
             
@@ -795,7 +733,6 @@ class ReaderHelperApp:
             cv2.rectangle(canvas, (btn_cx - 3, btn_cy - 4), (btn_cx + 3, btn_cy + 10), (255,255,255), -1)  # Mid bar
             cv2.rectangle(canvas, (btn_cx + 4, btn_cy - 12), (btn_cx + 10, btn_cy + 10), (255,255,255), -1) # Tall bar
 
-            # --- 4: Status Tab (Opens when button is clicked) ---
             if getattr(self, 'show_status_tab', False):
                 tab_w, tab_h = 240, 80
                 tab_x = btn_cx - tab_w + 20
@@ -998,9 +935,6 @@ class ReaderHelperApp:
             self.running = False
             return
 
-        # =================================================================
-        # 1. PROCESS VOICE COMMANDS FIRST (So the tutorial doesn't block it)
-        # =================================================================
         if getattr(self, 'pending_voice_action', None) is not None:
             action = self.pending_voice_action
             self.pending_voice_action = None # Clear the flag immediately
@@ -1012,7 +946,6 @@ class ReaderHelperApp:
                     if not self.tutorial.is_active:
                         self.face_tracker.start_calibration() 
             
-            # --- NEW: Trigger the Confirmation Prompt ---
             elif action == 'ASK_CONFIRM_SUMMARY':
                 print("[SYSTEM] Asking for summary confirmation...")
                 self.prompt_active = True
@@ -1038,10 +971,6 @@ class ReaderHelperApp:
                 else:
                     self._decline_prompt()
 
-        # =================================================================
-        # 2. INTERCEPT KEYBOARD FOR TUTORIAL
-        # ... (Keep your existing tutorial keyboard code here) ...
-        # =================================================================
         if self.tutorial.is_active:
             if key_char == 32:  
                 self.tutorial.process_input(32, None)
@@ -1049,9 +978,6 @@ class ReaderHelperApp:
                     self.face_tracker.start_calibration()
             return 
 
-        # =================================================================
-        # 3. STANDARD KEYBOARD INPUTS
-        # =================================================================
         if key_char == ord('i') and self.gaze_reader.is_calibrated:
             self.inference_mode = not self.inference_mode
             
@@ -1064,7 +990,6 @@ class ReaderHelperApp:
             self.dlg_para = None
             self.dlg_summary['text'] = None
             
-        # --- Prompt Inputs (Bottom Right Window) ---
         elif key_char in (ord('y'), ord('Y')) and getattr(self, 'prompt_active', False):
             if getattr(self, 'prompt_reason', None) == 'VOICE_COMMAND_SUMMARY':
                 self.prompt_active = False
@@ -1080,9 +1005,6 @@ class ReaderHelperApp:
             else:
                 self._decline_prompt()
                 
-        # ... (Keep the rest of your keyboard logic for scrolling/calibration down here) ...
-            
-        # Reading Inputs
         elif not self.dlg_active:
             if key_char == ord('j'):
                 self.scroll_y = min(self.max_scroll, self.scroll_y + SCROLL_STEP)
@@ -1101,7 +1023,6 @@ class ReaderHelperApp:
                 self.dialog_controller.reset_dwell()
                 self.hov_buf.clear()
             
-            # Calibration / Drift Inputs
             elif key_char == ord('r'):
                 self.calib_index = 0
                 self.sampling_active = False
